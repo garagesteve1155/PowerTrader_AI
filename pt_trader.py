@@ -1,31 +1,44 @@
+"""
+PowerTrader_AI - Trading Bot
+
+GitHub: https://github.com/garagesteve1155/PowerTrader_AI
+Author: Stephen Bryant Hughes
+License: Apache License Version 2.0
+
+PowerTrader_AI is a fully automated crypto trading system powered by a custom price prediction AI
+and a structured/tiered DCA system. This script executes trades based on signals from the Thinker,
+manages DCA (Dollar-Cost Averaging) with up to 2 buys per 24hr window, and sells using a trailing
+profit margin (5% if no DCA, 2.5% if DCA occurred) with a 0.5% trailing gap.
+"""
+
+"""Trading bot for PowerTrader."""
+
 import base64
 import datetime
 import json
-import uuid
-import time
 import math
-from typing import Any, Dict, Optional
-import requests
-from nacl.signing import SigningKey
 import os
-import colorama
-from colorama import Fore, Style
+import time
 import traceback
-from cryptography.hazmat.primitives.asymmetric import ed25519
-from cryptography.hazmat.primitives import serialization
+import uuid
+from typing import Any, Dict, Optional
+from colorama import Fore, Style
+import colorama
+from nacl.signing import SigningKey
+import requests
 
 # -----------------------------
 # GUI HUB OUTPUTS
 # -----------------------------
-HUB_DATA_DIR = os.environ.get("POWERTRADER_HUB_DIR", os.path.join(os.path.dirname(__file__), "hub_data"))
+HUB_DATA_DIR = os.environ.get(
+    "POWERTRADER_HUB_DIR", os.path.join(os.path.dirname(__file__), "hub_data")
+)
 os.makedirs(HUB_DATA_DIR, exist_ok=True)
 
 TRADER_STATUS_PATH = os.path.join(HUB_DATA_DIR, "trader_status.json")
 TRADE_HISTORY_PATH = os.path.join(HUB_DATA_DIR, "trade_history.jsonl")
 PNL_LEDGER_PATH = os.path.join(HUB_DATA_DIR, "pnl_ledger.json")
 ACCOUNT_VALUE_HISTORY_PATH = os.path.join(HUB_DATA_DIR, "account_value_history.jsonl")
-
-
 
 # Initialize colorama
 colorama.init(autoreset=True)
@@ -34,85 +47,86 @@ colorama.init(autoreset=True)
 # GUI SETTINGS (coins list + main_neural_dir)
 # -----------------------------
 _GUI_SETTINGS_PATH = os.environ.get("POWERTRADER_GUI_SETTINGS") or os.path.join(
-	os.path.dirname(os.path.abspath(__file__)),
-	"gui_settings.json"
+    os.path.dirname(os.path.abspath(__file__)), "gui_settings.json"
 )
 
 _gui_settings_cache = {
-	"mtime": None,
-	"coins": ['BTC', 'ETH', 'XRP', 'BNB', 'DOGE'],  # fallback defaults
-	"main_neural_dir": None,
+    "mtime": None,
+    "coins": ["BTC", "ETH", "XRP", "BNB", "DOGE"],  # fallback defaults
+    "main_neural_dir": None,
 }
 
+
 def _load_gui_settings() -> dict:
-	"""
-	Reads gui_settings.json and returns a dict with:
-	- coins: uppercased list
-	- main_neural_dir: string (may be None)
-	Caches by mtime so it is cheap to call frequently.
-	"""
-	try:
-		if not os.path.isfile(_GUI_SETTINGS_PATH):
-			return dict(_gui_settings_cache)
+    """
+    Reads gui_settings.json and returns a dict with:
+    - coins: uppercased list
+    - main_neural_dir: string (may be None)
+    Caches by mtime so it is cheap to call frequently.
+    """
+    try:
+        if not os.path.isfile(_GUI_SETTINGS_PATH):
+            return dict(_gui_settings_cache)
 
-		mtime = os.path.getmtime(_GUI_SETTINGS_PATH)
-		if _gui_settings_cache["mtime"] == mtime:
-			return dict(_gui_settings_cache)
+        mtime = os.path.getmtime(_GUI_SETTINGS_PATH)
+        if _gui_settings_cache["mtime"] == mtime:
+            return dict(_gui_settings_cache)
 
-		with open(_GUI_SETTINGS_PATH, "r", encoding="utf-8") as f:
-			data = json.load(f) or {}
+        with open(_GUI_SETTINGS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f) or {}
 
-		coins = data.get("coins", None)
-		if not isinstance(coins, list) or not coins:
-			coins = list(_gui_settings_cache["coins"])
-		coins = [str(c).strip().upper() for c in coins if str(c).strip()]
-		if not coins:
-			coins = list(_gui_settings_cache["coins"])
+        coins = data.get("coins", None)
+        if not isinstance(coins, list) or not coins:
+            coins = list(_gui_settings_cache["coins"])
+        coins = [str(c).strip().upper() for c in coins if str(c).strip()]
+        if not coins:
+            coins = list(_gui_settings_cache["coins"])
 
-		main_neural_dir = data.get("main_neural_dir", None)
-		if isinstance(main_neural_dir, str):
-			main_neural_dir = main_neural_dir.strip() or None
-		else:
-			main_neural_dir = None
+        main_neural_dir = data.get("main_neural_dir", None)
+        if isinstance(main_neural_dir, str):
+            main_neural_dir = main_neural_dir.strip() or None
+        else:
+            main_neural_dir = None
 
-		_gui_settings_cache["mtime"] = mtime
-		_gui_settings_cache["coins"] = coins
-		_gui_settings_cache["main_neural_dir"] = main_neural_dir
+        _gui_settings_cache["mtime"] = mtime
+        _gui_settings_cache["coins"] = coins
+        _gui_settings_cache["main_neural_dir"] = main_neural_dir
 
-		return {
-			"mtime": mtime,
-			"coins": list(coins),
-			"main_neural_dir": main_neural_dir,
-		}
-	except Exception:
-		return dict(_gui_settings_cache)
+        return {
+            "mtime": mtime,
+            "coins": list(coins),
+            "main_neural_dir": main_neural_dir,
+        }
+    except Exception:
+        return dict(_gui_settings_cache)
+
 
 def _build_base_paths(main_dir_in: str, coins_in: list) -> dict:
-	"""
-	Safety rule:
-	- BTC uses main_dir directly
-	- other coins use <main_dir>/<SYM> ONLY if that folder exists
-	  (no fallback to BTC folder — avoids corrupting BTC data)
-	"""
-	out = {"BTC": main_dir_in}
-	try:
-		for sym in coins_in:
-			sym = str(sym).strip().upper()
-			if not sym:
-				continue
-			if sym == "BTC":
-				out["BTC"] = main_dir_in
-				continue
-			sub = os.path.join(main_dir_in, sym)
-			if os.path.isdir(sub):
-				out[sym] = sub
-	except Exception:
-		pass
-	return out
+    """
+    Safety rule:
+    - BTC uses main_dir directly
+    - other coins use <main_dir>/<SYM> ONLY if that folder exists
+      (no fallback to BTC folder — avoids corrupting BTC data)
+    """
+    out = {"BTC": main_dir_in}
+    try:
+        for sym in coins_in:
+            sym = str(sym).strip().upper()
+            if not sym:
+                continue
+            if sym == "BTC":
+                out["BTC"] = main_dir_in
+                continue
+            sub = os.path.join(main_dir_in, sym)
+            if os.path.isdir(sub):
+                out[sym] = sub
+    except Exception:
+        pass
+    return out
 
 
 # Live globals (will be refreshed inside manage_trades())
-crypto_symbols = ['BTC', 'ETH', 'XRP', 'BNB', 'DOGE']
+crypto_symbols = ["BTC", "ETH", "XRP", "BNB", "DOGE"]
 
 # Default main_dir behavior if settings are missing
 main_dir = os.getcwd()
@@ -120,45 +134,46 @@ base_paths = {"BTC": main_dir}
 
 _last_settings_mtime = None
 
+
 def _refresh_paths_and_symbols():
-	"""
-	Hot-reload coins + main_neural_dir while trader is running.
-	Updates globals: crypto_symbols, main_dir, base_paths
-	"""
-	global crypto_symbols, main_dir, base_paths, _last_settings_mtime
+    """
+    Hot-reload coins + main_neural_dir while trader is running.
+    Updates globals: crypto_symbols, main_dir, base_paths
+    """
+    global crypto_symbols, main_dir, base_paths, _last_settings_mtime
 
-	s = _load_gui_settings()
-	mtime = s.get("mtime", None)
+    s = _load_gui_settings()
+    mtime = s.get("mtime", None)
 
-	# If settings file doesn't exist, keep current defaults
-	if mtime is None:
-		return
+    # If settings file doesn't exist, keep current defaults
+    if mtime is None:
+        return
 
-	if _last_settings_mtime == mtime:
-		return
+    if _last_settings_mtime == mtime:
+        return
 
-	_last_settings_mtime = mtime
+    _last_settings_mtime = mtime
 
-	coins = s.get("coins") or list(crypto_symbols)
-	mndir = s.get("main_neural_dir") or main_dir
+    coins = s.get("coins") or list(crypto_symbols)
+    mndir = s.get("main_neural_dir") or main_dir
 
-	# Keep it safe if folder isn't real on this machine
-	if not os.path.isdir(mndir):
-		mndir = os.getcwd()
+    # Keep it safe if folder isn't real on this machine
+    if not os.path.isdir(mndir):
+        mndir = os.getcwd()
 
-	crypto_symbols = list(coins)
-	main_dir = mndir
-	base_paths = _build_base_paths(main_dir, crypto_symbols)
+    crypto_symbols = list(coins)
+    main_dir = mndir
+    base_paths = _build_base_paths(main_dir, crypto_symbols)
 
 
-#API STUFF
+# API STUFF
 API_KEY = ""
 BASE64_PRIVATE_KEY = ""
 
 try:
-    with open('r_key.txt', 'r', encoding='utf-8') as f:
+    with open("r_key.txt", "r", encoding="utf-8") as f:
         API_KEY = (f.read() or "").strip()
-    with open('r_secret.txt', 'r', encoding='utf-8') as f:
+    with open("r_secret.txt", "r", encoding="utf-8") as f:
         BASE64_PRIVATE_KEY = (f.read() or "").strip()
 except Exception:
     API_KEY = ""
@@ -173,6 +188,7 @@ if not API_KEY or not BASE64_PRIVATE_KEY:
     )
     raise SystemExit(1)
 
+
 class CryptoAPITrading:
     def __init__(self):
         # keep a copy of the folder map (same idea as trader.py)
@@ -184,16 +200,28 @@ class CryptoAPITrading:
         self.base_url = "https://trading.robinhood.com"
 
         self.dca_levels_triggered = {}  # Track DCA levels for each crypto
-        self.dca_levels = [-2.5, -5.0, -10.0, -20.0, -30.0, -40.0, -50.0]  # Moved to instance variable
+        self.dca_levels = [
+            -2.5,
+            -5.0,
+            -10.0,
+            -20.0,
+            -30.0,
+            -40.0,
+            -50.0,
+        ]  # Moved to instance variable
 
         # --- Trailing profit margin (per-coin state) ---
         # Each coin keeps its own trailing PM line, peak, and "was above line" flag.
-        self.trailing_pm = {}  # { "BTC": {"active": bool, "line": float, "peak": float, "was_above": bool}, ... }
+        self.trailing_pm = (
+            {}
+        )  # { "BTC": {"active": bool, "line": float, "peak": float, "was_above": bool}, ... }
         self.trailing_gap_pct = 0.5  # 0.5% trail gap behind peak
         self.pm_start_pct_no_dca = 5.0
         self.pm_start_pct_with_dca = 2.5
 
-        self.cost_basis = self.calculate_cost_basis()  # Initialize cost basis at startup
+        self.cost_basis = (
+            self.calculate_cost_basis()
+        )  # Initialize cost basis at startup
         self.initialize_dca_levels()  # Initialize DCA levels based on historical buy orders
 
         # GUI hub persistence
@@ -214,16 +242,9 @@ class CryptoAPITrading:
         # --- DCA rate-limit (per trade, per coin, rolling 24h window) ---
         self.max_dca_buys_per_24h = 2
         self.dca_window_seconds = 24 * 60 * 60
-        self._dca_buy_ts = {}         # { "BTC": [ts, ts, ...] } (DCA buys only)
-        self._dca_last_sell_ts = {}   # { "BTC": ts_of_last_sell }
+        self._dca_buy_ts = {}  # { "BTC": [ts, ts, ...] } (DCA buys only)
+        self._dca_last_sell_ts = {}  # { "BTC": ts_of_last_sell }
         self._seed_dca_window_from_history()
-
-
-
-
-
-
-
 
     def _atomic_write_json(self, path: str, data: dict) -> None:
         try:
@@ -279,7 +300,9 @@ class CryptoAPITrading:
         if side.lower() == "sell" and price is not None and avg_cost_basis is not None:
             try:
                 realized = (float(price) - float(avg_cost_basis)) * float(qty)
-                self._pnl_ledger["total_realized_profit_usd"] = float(self._pnl_ledger.get("total_realized_profit_usd", 0.0)) + float(realized)
+                self._pnl_ledger["total_realized_profit_usd"] = float(
+                    self._pnl_ledger.get("total_realized_profit_usd", 0.0)
+                ) + float(realized)
             except Exception:
                 realized = None
 
@@ -298,7 +321,6 @@ class CryptoAPITrading:
         self._append_jsonl(TRADE_HISTORY_PATH, entry)
         if realized is not None:
             self._save_pnl_ledger()
-
 
     def _write_trader_status(self, status: dict) -> None:
         self._atomic_write_json(TRADER_STATUS_PATH, status)
@@ -344,7 +366,6 @@ class CryptoAPITrading:
 
         return s
 
-
     @staticmethod
     def _read_long_dca_signal(symbol: str) -> int:
         """
@@ -355,7 +376,9 @@ class CryptoAPITrading:
         - DCA assist: levels 4-7 map to trader DCA stages 0-3 (trade starts at level 3 => stage 0)
         """
         sym = str(symbol).upper().strip()
-        folder = base_paths.get(sym, main_dir if sym == "BTC" else os.path.join(main_dir, sym))
+        folder = base_paths.get(
+            sym, main_dir if sym == "BTC" else os.path.join(main_dir, sym)
+        )
         path = os.path.join(folder, "long_dca_signal.txt")
         try:
             with open(path, "r") as f:
@@ -364,7 +387,6 @@ class CryptoAPITrading:
             return val
         except Exception:
             return 0
-
 
     @staticmethod
     def _read_short_dca_signal(symbol: str) -> int:
@@ -376,7 +398,9 @@ class CryptoAPITrading:
         - DCA assist: levels 4-7 map to trader DCA stages 0-3 (trade starts at level 3 => stage 0)
         """
         sym = str(symbol).upper().strip()
-        folder = base_paths.get(sym, main_dir if sym == "BTC" else os.path.join(main_dir, sym))
+        folder = base_paths.get(
+            sym, main_dir if sym == "BTC" else os.path.join(main_dir, sym)
+        )
         path = os.path.join(folder, "short_dca_signal.txt")
         try:
             with open(path, "r") as f:
@@ -386,12 +410,7 @@ class CryptoAPITrading:
         except Exception:
             return 0
 
-
-
-
-
     def initialize_dca_levels(self):
-
         """
         Initializes the DCA levels_triggered dictionary based on the number of buy orders
         that have occurred after the first buy order following the most recent sell order
@@ -407,17 +426,18 @@ class CryptoAPITrading:
 
             full_symbol = f"{symbol}-USD"
             orders = self.get_orders(full_symbol)
-            
+
             if not orders or "results" not in orders:
                 print(f"No orders found for {full_symbol}. Skipping.")
                 continue
 
             # Filter for filled buy and sell orders
             filled_orders = [
-                order for order in orders["results"]
+                order
+                for order in orders["results"]
                 if order["state"] == "filled" and order["side"] in ["buy", "sell"]
             ]
-            
+
             if not filled_orders:
                 print(f"No filled buy or sell orders for {full_symbol}. Skipping.")
                 continue
@@ -436,25 +456,30 @@ class CryptoAPITrading:
             if most_recent_sell_time:
                 # Find all buy orders after the most recent sell
                 relevant_buy_orders = [
-                    order for order in filled_orders
-                    if order["side"] == "buy" and order["created_at"] > most_recent_sell_time
+                    order
+                    for order in filled_orders
+                    if order["side"] == "buy"
+                    and order["created_at"] > most_recent_sell_time
                 ]
                 if not relevant_buy_orders:
-                    print(f"No buy orders after the most recent sell for {full_symbol}.")
+                    print(
+                        f"No buy orders after the most recent sell for {full_symbol}."
+                    )
                     self.dca_levels_triggered[symbol] = []
                     continue
                 print(f"Most recent sell for {full_symbol} at {most_recent_sell_time}.")
             else:
                 # If no sell orders, consider all buy orders
                 relevant_buy_orders = [
-                    order for order in filled_orders
-                    if order["side"] == "buy"
+                    order for order in filled_orders if order["side"] == "buy"
                 ]
                 if not relevant_buy_orders:
                     print(f"No buy orders for {full_symbol}. Skipping.")
                     self.dca_levels_triggered[symbol] = []
                     continue
-                print(f"No sell orders found for {full_symbol}. Considering all buy orders.")
+                print(
+                    f"No sell orders found for {full_symbol}. Considering all buy orders."
+                )
 
             # Ensure buy orders are sorted by creation time ascending
             relevant_buy_orders.sort(key=lambda x: x["created_at"])
@@ -465,7 +490,8 @@ class CryptoAPITrading:
 
             # Count the number of buy orders after the first buy
             buy_orders_after_first = [
-                order for order in relevant_buy_orders
+                order
+                for order in relevant_buy_orders
                 if order["created_at"] > first_buy_time
             ]
 
@@ -475,7 +501,6 @@ class CryptoAPITrading:
             # This makes neural-vs-hardcoded clean, and allows repeating the -50% stage indefinitely.
             self.dca_levels_triggered[symbol] = list(range(triggered_levels_count))
             print(f"Initialized DCA stages for {symbol}: {triggered_levels_count}")
-
 
     def _seed_dca_window_from_history(self) -> None:
         """
@@ -536,8 +561,9 @@ class CryptoAPITrading:
             kept.sort()
             self._dca_buy_ts[base] = kept
 
-
-    def _dca_window_count(self, base_symbol: str, now_ts: Optional[float] = None) -> int:
+    def _dca_window_count(
+        self, base_symbol: str, now_ts: Optional[float] = None
+    ) -> int:
         """
         Count of DCA buys for this coin within rolling 24h in the *current trade*.
         Current trade boundary = most recent sell we observed for this coin.
@@ -555,7 +581,6 @@ class CryptoAPITrading:
         self._dca_buy_ts[base] = ts_list
         return len(ts_list)
 
-
     def _note_dca_buy(self, base_symbol: str, ts: Optional[float] = None) -> None:
         base = str(base_symbol).upper().strip()
         if not base:
@@ -564,15 +589,15 @@ class CryptoAPITrading:
         self._dca_buy_ts.setdefault(base, []).append(t)
         self._dca_window_count(base, now_ts=t)  # prune in-place
 
-
-    def _reset_dca_window_for_trade(self, base_symbol: str, sold: bool = False, ts: Optional[float] = None) -> None:
+    def _reset_dca_window_for_trade(
+        self, base_symbol: str, sold: bool = False, ts: Optional[float] = None
+    ) -> None:
         base = str(base_symbol).upper().strip()
         if not base:
             return
         if sold:
             self._dca_last_sell_ts[base] = float(ts if ts is not None else time.time())
         self._dca_buy_ts[base] = []
-
 
     def make_api_request(self, method: str, path: str, body: Optional[str] = "") -> Any:
 
@@ -584,7 +609,9 @@ class CryptoAPITrading:
             if method == "GET":
                 response = requests.get(url, headers=headers, timeout=10)
             elif method == "POST":
-                response = requests.post(url, headers=headers, json=json.loads(body), timeout=10)
+                response = requests.post(
+                    url, headers=headers, json=json.loads(body), timeout=10
+                )
 
             response.raise_for_status()
             return response.json()
@@ -599,7 +626,7 @@ class CryptoAPITrading:
             return None
 
     def get_authorization_header(
-            self, method: str, path: str, body: str, timestamp: int
+        self, method: str, path: str, body: str, timestamp: int
     ) -> Dict[str, str]:
         message_to_sign = f"{self.api_key}{timestamp}{path}{method}{body}"
         signed = self.private_key.sign(message_to_sign.encode("utf-8"))
@@ -640,7 +667,9 @@ class CryptoAPITrading:
         if not holdings or "results" not in holdings:
             return {}
 
-        active_assets = {holding["asset_code"] for holding in holdings.get("results", [])}
+        active_assets = {
+            holding["asset_code"] for holding in holdings.get("results", [])
+        }
         current_quantities = {
             holding["asset_code"]: float(holding["total_quantity"])
             for holding in holdings.get("results", [])
@@ -655,7 +684,8 @@ class CryptoAPITrading:
 
             # Get all filled buy orders, sorted from most recent to oldest
             buy_orders = [
-                order for order in orders["results"]
+                order
+                for order in orders["results"]
                 if order["side"] == "buy" and order["state"] == "filled"
             ]
             buy_orders.sort(key=lambda x: x["created_at"], reverse=True)
@@ -712,7 +742,11 @@ class CryptoAPITrading:
 
                 # Update cache for transient failures later
                 try:
-                    self._last_good_bid_ask[symbol] = {"ask": ask, "bid": bid, "ts": time.time()}
+                    self._last_good_bid_ask[symbol] = {
+                        "ask": ask,
+                        "bid": bid,
+                        "ts": time.time(),
+                    }
                 except Exception:
                     pass
             else:
@@ -733,7 +767,6 @@ class CryptoAPITrading:
 
         return buy_prices, sell_prices, valid_symbols
 
-
     def place_buy_order(
         self,
         client_order_id: str,
@@ -746,7 +779,9 @@ class CryptoAPITrading:
         tag: Optional[str] = None,
     ) -> Any:
         # Fetch the current price of the asset
-        current_buy_prices, current_sell_prices, valid_symbols = self.get_price([symbol])
+        current_buy_prices, current_sell_prices, valid_symbols = self.get_price(
+            [symbol]
+        )
         current_price = current_buy_prices[symbol]
         asset_quantity = amount_in_usd / current_price
 
@@ -766,7 +801,7 @@ class CryptoAPITrading:
                     "symbol": symbol,
                     "market_order_config": {
                         "asset_quantity": f"{rounded_quantity:.8f}"  # Start with 8 decimal places
-                    }
+                    },
                 }
 
                 path = "/api/v1/crypto/trading/orders/"
@@ -774,7 +809,11 @@ class CryptoAPITrading:
                 if response and "errors" not in response:
                     # Record for GUI history (estimated fill at current_price)
                     try:
-                        order_id = response.get("id", None) if isinstance(response, dict) else None
+                        order_id = (
+                            response.get("id", None)
+                            if isinstance(response, dict)
+                            else None
+                        )
                     except Exception:
                         order_id = None
                     self._record_trade(
@@ -782,7 +821,11 @@ class CryptoAPITrading:
                         symbol=symbol,
                         qty=float(rounded_quantity),
                         price=float(current_price),
-                        avg_cost_basis=float(avg_cost_basis) if avg_cost_basis is not None else None,
+                        avg_cost_basis=(
+                            float(avg_cost_basis)
+                            if avg_cost_basis is not None
+                            else None
+                        ),
                         pnl_pct=float(pnl_pct) if pnl_pct is not None else None,
                         tag=tag,
                         order_id=order_id,
@@ -790,8 +833,7 @@ class CryptoAPITrading:
                     return response  # Successfully placed order
 
             except Exception as e:
-                pass #print(traceback.format_exc())
-                
+                pass  # print(traceback.format_exc())
 
             # Check for precision errors
             if response and "errors" in response:
@@ -808,7 +850,6 @@ class CryptoAPITrading:
                         return None
 
         return None
-
 
     def place_sell_order(
         self,
@@ -827,13 +868,11 @@ class CryptoAPITrading:
             "side": side,
             "type": order_type,
             "symbol": symbol,
-            "market_order_config": {
-                "asset_quantity": f"{asset_quantity:.8f}"
-            }
+            "market_order_config": {"asset_quantity": f"{asset_quantity:.8f}"},
         }
 
         path = "/api/v1/crypto/trading/orders/"
-   
+
         response = self.make_api_request("POST", path, json.dumps(body))
 
         if response and isinstance(response, dict) and "errors" not in response:
@@ -843,15 +882,15 @@ class CryptoAPITrading:
                 symbol=symbol,
                 qty=float(asset_quantity),
                 price=float(expected_price) if expected_price is not None else None,
-                avg_cost_basis=float(avg_cost_basis) if avg_cost_basis is not None else None,
+                avg_cost_basis=(
+                    float(avg_cost_basis) if avg_cost_basis is not None else None
+                ),
                 pnl_pct=float(pnl_pct) if pnl_pct is not None else None,
                 tag=tag,
                 order_id=order_id,
             )
 
         return response
-
-
 
     def manage_trades(self):
         trades_made = False  # Flag to track if any trade was made in this iteration
@@ -873,7 +912,9 @@ class CryptoAPITrading:
         # Use the stored cost_basis instead of recalculating
         cost_basis = self.cost_basis
         # Fetch current prices
-        symbols = [holding["asset_code"] + "-USD" for holding in holdings.get("results", [])]
+        symbols = [
+            holding["asset_code"] + "-USD" for holding in holdings.get("results", [])
+        ]
 
         # ALSO fetch prices for tracked coins even if not currently held (so GUI can show bid/ask lines)
         for s in crypto_symbols:
@@ -895,7 +936,9 @@ class CryptoAPITrading:
 
         # holdings list (treat missing/invalid holdings payload as transient error)
         try:
-            holdings_list = holdings.get("results", None) if isinstance(holdings, dict) else None
+            holdings_list = (
+                holdings.get("results", None) if isinstance(holdings, dict) else None
+            )
             if not isinstance(holdings_list, list):
                 holdings_list = []
                 snapshot_ok = False
@@ -932,7 +975,11 @@ class CryptoAPITrading:
                 continue
 
         total_account_value = buying_power + holdings_sell_value
-        in_use = (holdings_sell_value / total_account_value) * 100 if total_account_value > 0 else 0.0
+        in_use = (
+            (holdings_sell_value / total_account_value) * 100
+            if total_account_value > 0
+            else 0.0
+        )
 
         # If this tick is incomplete, fall back to last known-good snapshot so the GUI chart never gets a bogus dip.
         if (not snapshot_ok) or (total_account_value <= 0.0):
@@ -940,8 +987,12 @@ class CryptoAPITrading:
             if last.get("total_account_value") is not None:
                 total_account_value = float(last["total_account_value"])
                 buying_power = float(last.get("buying_power", buying_power or 0.0))
-                holdings_sell_value = float(last.get("holdings_sell_value", holdings_sell_value or 0.0))
-                holdings_buy_value = float(last.get("holdings_buy_value", holdings_buy_value or 0.0))
+                holdings_sell_value = float(
+                    last.get("holdings_sell_value", holdings_sell_value or 0.0)
+                )
+                holdings_buy_value = float(
+                    last.get("holdings_buy_value", holdings_buy_value or 0.0)
+                )
                 in_use = float(last.get("percent_in_trade", in_use or 0.0))
         else:
             # Save last complete snapshot
@@ -953,7 +1004,7 @@ class CryptoAPITrading:
                 "percent_in_trade": float(in_use),
             }
 
-        os.system('cls' if os.name == 'nt' else 'clear')
+        os.system("cls" if os.name == "nt" else "clear")
         print("\n--- Account Summary ---")
         print(f"Total Account Value: ${total_account_value:.2f}")
         print(f"Holdings Value: ${holdings_sell_value:.2f}")
@@ -978,12 +1029,18 @@ class CryptoAPITrading:
             avg_cost_basis = cost_basis.get(symbol, 0)
 
             if avg_cost_basis > 0:
-                gain_loss_percentage_buy = ((current_buy_price - avg_cost_basis) / avg_cost_basis) * 100
-                gain_loss_percentage_sell = ((current_sell_price - avg_cost_basis) / avg_cost_basis) * 100
+                gain_loss_percentage_buy = (
+                    (current_buy_price - avg_cost_basis) / avg_cost_basis
+                ) * 100
+                gain_loss_percentage_sell = (
+                    (current_sell_price - avg_cost_basis) / avg_cost_basis
+                ) * 100
             else:
                 gain_loss_percentage_buy = 0
                 gain_loss_percentage_sell = 0
-                print(f"  Warning: Average Cost Basis is 0 for {symbol}, Gain/Loss calculation skipped.")
+                print(
+                    f"  Warning: Average Cost Basis is 0 for {symbol}, Gain/Loss calculation skipped."
+                )
 
             value = quantity * current_sell_price
             triggered_levels_count = len(self.dca_levels_triggered.get(symbol, []))
@@ -993,7 +1050,11 @@ class CryptoAPITrading:
             next_stage = triggered_levels_count  # stage 0 == first DCA after entry (trade starts at neural level 3)
 
             # Hardcoded % for this stage (repeat -50% after we reach it)
-            hard_next = self.dca_levels[next_stage] if next_stage < len(self.dca_levels) else self.dca_levels[-1]
+            hard_next = (
+                self.dca_levels[next_stage]
+                if next_stage < len(self.dca_levels)
+                else self.dca_levels[-1]
+            )
 
             # Neural DCA only applies to first 4 DCA stages:
             # stage 0-> neural 4, stage 1->5, stage 2->6, stage 3->7
@@ -1021,7 +1082,9 @@ class CryptoAPITrading:
                     neural_level_needed_disp = next_stage + 4
                     neural_level_now_disp = self._read_long_dca_signal(symbol)
 
-                    neural_ready_now = (gain_loss_percentage_buy < 0) and (neural_level_now_disp >= neural_level_needed_disp)
+                    neural_ready_now = (gain_loss_percentage_buy < 0) and (
+                        neural_level_now_disp >= neural_level_needed_disp
+                    )
                     if neural_ready_now:
                         neural_line_price = current_buy_price
                         if neural_line_price > dca_line_price:
@@ -1032,9 +1095,9 @@ class CryptoAPITrading:
                 # (same calculation as GUI "Buy Price PnL": current buy/ask vs avg cost basis)
                 dca_line_pct = gain_loss_percentage_buy
 
-
-
-            dca_line_price_disp = self._fmt_price(dca_line_price) if avg_cost_basis > 0 else "N/A"
+            dca_line_price_disp = (
+                self._fmt_price(dca_line_price) if avg_cost_basis > 0 else "N/A"
+            )
 
             # Set color code:
             # - DCA is green if we're above the chosen DCA line, red if we're below it
@@ -1060,7 +1123,11 @@ class CryptoAPITrading:
             dist_to_trail_pct = 0.0
 
             if avg_cost_basis > 0:
-                pm_start_pct_disp = self.pm_start_pct_no_dca if int(triggered_levels) == 0 else self.pm_start_pct_with_dca
+                pm_start_pct_disp = (
+                    self.pm_start_pct_no_dca
+                    if int(triggered_levels) == 0
+                    else self.pm_start_pct_with_dca
+                )
                 base_pm_line_disp = avg_cost_basis * (1.0 + (pm_start_pct_disp / 100.0))
 
                 state = self.trailing_pm.get(symbol)
@@ -1078,8 +1145,10 @@ class CryptoAPITrading:
                 trail_status = "ON" if (active_disp or above_disp) else "OFF"
 
                 if trail_line_disp > 0:
-                    dist_to_trail_pct = ((current_sell_price - trail_line_disp) / trail_line_disp) * 100.0
-            file = open(symbol+'_current_price.txt', 'w+')
+                    dist_to_trail_pct = (
+                        (current_sell_price - trail_line_disp) / trail_line_disp
+                    ) * 100.0
+            file = open(symbol + "_current_price.txt", "w+")
             file.write(str(current_buy_price))
             file.close()
             positions[symbol] = {
@@ -1098,9 +1167,10 @@ class CryptoAPITrading:
                 "trail_active": True if (trail_status == "ON") else False,
                 "trail_line": float(trail_line_disp) if trail_line_disp else 0.0,
                 "trail_peak": float(trail_peak_disp) if trail_peak_disp else 0.0,
-                "dist_to_trail_pct": float(dist_to_trail_pct) if dist_to_trail_pct else 0.0,
+                "dist_to_trail_pct": (
+                    float(dist_to_trail_pct) if dist_to_trail_pct else 0.0
+                ),
             }
-
 
             print(
                 f"\nSymbol: {symbol}"
@@ -1109,9 +1179,6 @@ class CryptoAPITrading:
                 f"  |  DCA Levels Triggered: {triggered_levels}"
                 f"  |  Trade Value: ${value:.2f}"
             )
-
-
-
 
             if avg_cost_basis > 0:
                 print(
@@ -1122,20 +1189,27 @@ class CryptoAPITrading:
             else:
                 print("  PM/Trail: N/A (avg_cost_basis is 0)")
 
-
-
             # --- Trailing profit margin (0.5% trail gap) ---
             # PM "start line" is the normal 5% / 2.5% line (depending on DCA levels hit).
             # Trailing activates once price is ABOVE the PM start line, then line follows peaks up
             # by 0.5%. Forced sell happens ONLY when price goes from ABOVE the trailing line to BELOW it.
             if avg_cost_basis > 0:
-                pm_start_pct = self.pm_start_pct_no_dca if int(triggered_levels) == 0 else self.pm_start_pct_with_dca
+                pm_start_pct = (
+                    self.pm_start_pct_no_dca
+                    if int(triggered_levels) == 0
+                    else self.pm_start_pct_with_dca
+                )
                 base_pm_line = avg_cost_basis * (1.0 + (pm_start_pct / 100.0))
                 trail_gap = self.trailing_gap_pct / 100.0  # 0.5% => 0.005
 
                 state = self.trailing_pm.get(symbol)
                 if state is None:
-                    state = {"active": False, "line": base_pm_line, "peak": 0.0, "was_above": False}
+                    state = {
+                        "active": False,
+                        "line": base_pm_line,
+                        "peak": 0.0,
+                        "was_above": False,
+                    }
                     self.trailing_pm[symbol] = state
                 else:
                     # Never let the line be below the (possibly updated) base PM start line
@@ -1179,9 +1253,10 @@ class CryptoAPITrading:
                             tag="TRAIL_SELL",
                         )
 
-
                         trades_made = True
-                        self.trailing_pm.pop(symbol, None)  # clear per-coin trailing state on exit
+                        self.trailing_pm.pop(
+                            symbol, None
+                        )  # clear per-coin trailing state on exit
 
                         # Trade ended -> reset rolling 24h DCA window for this coin
                         self._reset_dca_window_for_trade(symbol, sold=True)
@@ -1205,7 +1280,11 @@ class CryptoAPITrading:
             current_stage = len(self.dca_levels_triggered.get(symbol, []))
 
             # Hardcoded loss % for this stage (repeat last level after list ends)
-            hard_level = self.dca_levels[current_stage] if current_stage < len(self.dca_levels) else self.dca_levels[-1]
+            hard_level = (
+                self.dca_levels[current_stage]
+                if current_stage < len(self.dca_levels)
+                else self.dca_levels[-1]
+            )
             hard_hit = gain_loss_percentage_buy <= hard_level
 
             # Neural trigger only for first 4 DCA stages
@@ -1217,7 +1296,9 @@ class CryptoAPITrading:
                 neural_level_now = self._read_long_dca_signal(symbol)
 
                 # Keep it sane: don't DCA from neural if we're not even below cost basis.
-                neural_hit = (gain_loss_percentage_buy < 0) and (neural_level_now >= neural_level_needed)
+                neural_hit = (gain_loss_percentage_buy < 0) and (
+                    neural_level_now >= neural_level_needed
+                )
 
             if hard_hit or neural_hit:
                 if neural_hit and hard_hit:
@@ -1256,7 +1337,9 @@ class CryptoAPITrading:
                     print(f"  Buy Response: {response}")
                     if response and "errors" not in response:
                         # record that we completed THIS stage (no matter what triggered it)
-                        self.dca_levels_triggered.setdefault(symbol, []).append(current_stage)
+                        self.dca_levels_triggered.setdefault(symbol, []).append(
+                            current_stage
+                        )
 
                         # Only record a DCA buy timestamp on success (so skips never advance anything)
                         self._note_dca_buy(symbol)
@@ -1270,7 +1353,6 @@ class CryptoAPITrading:
 
             else:
                 pass
-
 
         # --- ensure GUI gets bid/ask lines even for coins not currently held ---
         try:
@@ -1287,7 +1369,7 @@ class CryptoAPITrading:
 
                 # keep the per-coin current price file behavior for consistency
                 try:
-                    file = open(sym + '_current_price.txt', 'w+')
+                    file = open(sym + "_current_price.txt", "w+")
                     file.write(str(current_buy_price))
                     file.close()
                 except Exception:
@@ -1301,7 +1383,9 @@ class CryptoAPITrading:
                     "gain_loss_pct_buy": 0.0,
                     "gain_loss_pct_sell": 0.0,
                     "value_usd": 0.0,
-                    "dca_triggered_stages": int(len(self.dca_levels_triggered.get(sym, []))),
+                    "dca_triggered_stages": int(
+                        len(self.dca_levels_triggered.get(sym, []))
+                    ),
                     "next_dca_display": "",
                     "dca_line_price": 0.0,
                     "dca_line_source": "N/A",
@@ -1317,13 +1401,13 @@ class CryptoAPITrading:
         if not trading_pairs:
             return
 
-
-
-        allocation_in_usd = total_account_value * (0.00005/len(crypto_symbols))
+        allocation_in_usd = total_account_value * (0.00005 / len(crypto_symbols))
         if allocation_in_usd < 0.5:
             allocation_in_usd = 0.5
 
-        holding_full_symbols = [f"{h['asset_code']}-USD" for h in holdings.get("results", [])]
+        holding_full_symbols = [
+            f"{h['asset_code']}-USD" for h in holdings.get("results", [])
+        ]
 
         start_index = 0
         while start_index < len(crypto_symbols):
@@ -1344,9 +1428,6 @@ class CryptoAPITrading:
                 start_index += 1
                 continue
 
-
-
-
             response = self.place_buy_order(
                 str(uuid.uuid4()),
                 "buy",
@@ -1366,15 +1447,15 @@ class CryptoAPITrading:
                 # Reset trailing PM state for this coin (fresh trade, fresh trailing logic)
                 self.trailing_pm.pop(base_symbol, None)
 
-
                 print(
                     f"Starting new trade for {full_symbol} (AI start signal long={buy_count}, short={sell_count}). "
                     f"Allocating ${allocation_in_usd:.2f}."
                 )
                 time.sleep(5)
                 holdings = self.get_holdings()
-                holding_full_symbols = [f"{h['asset_code']}-USD" for h in holdings.get("results", [])]
-
+                holding_full_symbols = [
+                    f"{h['asset_code']}-USD" for h in holdings.get("results", [])
+                ]
 
             start_index += 1
 
@@ -1401,8 +1482,12 @@ class CryptoAPITrading:
                     "holdings_buy_value": holdings_buy_value,
                     "percent_in_trade": in_use,
                     # trailing PM config (matches what's printed above current trades)
-                    "pm_start_pct_no_dca": float(getattr(self, "pm_start_pct_no_dca", 0.0)),
-                    "pm_start_pct_with_dca": float(getattr(self, "pm_start_pct_with_dca", 0.0)),
+                    "pm_start_pct_no_dca": float(
+                        getattr(self, "pm_start_pct_no_dca", 0.0)
+                    ),
+                    "pm_start_pct_with_dca": float(
+                        getattr(self, "pm_start_pct_with_dca", 0.0)
+                    ),
                     "trailing_gap_pct": float(getattr(self, "trailing_gap_pct", 0.0)),
                 },
                 "positions": positions,
@@ -1415,9 +1500,6 @@ class CryptoAPITrading:
         except Exception:
             pass
 
-
-
-
     def run(self):
         while True:
             try:
@@ -1425,6 +1507,7 @@ class CryptoAPITrading:
                 time.sleep(0.5)
             except Exception as e:
                 print(traceback.format_exc())
+
 
 if __name__ == "__main__":
     trading_bot = CryptoAPITrading()
