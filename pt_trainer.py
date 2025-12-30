@@ -1,13 +1,5 @@
 from kucoin.client import Market
 market = Market(url='https://api.kucoin.com')
-import time
-"""
-<------------
-newest oldest
------------->
-oldest newest
-"""
-avg50 = []
 import sys
 import datetime
 import traceback
@@ -16,14 +8,34 @@ import base64
 import calendar
 import hashlib
 import hmac
-from datetime import datetime
+import psutil
+import logging
+import json
+import uuid
+import os
+import time
+
+"""
+PowerTrader Neural Network Trainer
+
+This module handles the training of neural networks for cryptocurrency trading predictions.
+It manages memory caching, threshold calculations, and training loops for various timeframes.
+"""
+
+"""
+<------------
+newest oldest
+------------>
+oldest newest
+"""
+# Global variables for training state and configuration
+avg50 = []
 sells_count = 0
 prediction_prices_avg_list = []
 pt_server = 'server'
-import psutil
-import logging
 list_len = 0
 restarting = 'no'
+restarted_yet = 0
 in_trade = 'no'
 updowncount = 0
 updowncount1 = 0
@@ -33,11 +45,11 @@ updowncount1_4 = 0
 high_var2 = 0.0
 low_var2 = 0.0
 last_flipped = 'no'
-starting_amounth02 = 100.0
-starting_amounth05 = 100.0
-starting_amounth10 = 100.0
-starting_amounth20 = 100.0
-starting_amounth50 = 100.0
+starting_amount02 = 100.0
+starting_amount05 = 100.0
+starting_amount10 = 100.0
+starting_amount20 = 100.0
+starting_amount50 = 100.0
 starting_amount = 100.0
 starting_amount1 = 100.0
 starting_amount1_2 = 100.0
@@ -101,24 +113,17 @@ upordown4_2 = []
 upordown4_3 = []
 upordown4_4 = []
 upordown5 = []
-import json
-import uuid
-import os
-
 # ---- speed knobs ----
 VERBOSE = False  # set True if you want the old high-volume prints
 def vprint(*args, **kwargs):
 	if VERBOSE:
 		print(*args, **kwargs)
-
 # Cache memory/weights in RAM (avoid re-reading and re-writing every loop)
 _memory_cache = {}  # tf_choice -> dict(memory_list, weight_list, high_weight_list, low_weight_list, dirty)
 _last_threshold_written = {}  # tf_choice -> float
-
 def _read_text(path):
 	with open(path, "r", encoding="utf-8", errors="ignore") as f:
 		return f.read()
-
 def load_memory(tf_choice):
 	"""Load memories/weights for a timeframe once and keep them in RAM."""
 	if tf_choice in _memory_cache:
@@ -148,7 +153,6 @@ def load_memory(tf_choice):
 		data["low_weight_list"] = []
 	_memory_cache[tf_choice] = data
 	return data
-
 def flush_memory(tf_choice, force=False):
 	"""Write memories/weights back to disk only when they changed (batch IO)."""
 	data = _memory_cache.get(tf_choice)
@@ -177,7 +181,6 @@ def flush_memory(tf_choice, force=False):
 	except:
 		pass
 	data["dirty"] = False
-
 def write_threshold_sometimes(tf_choice, perfect_threshold, loop_i, every=200):
 	"""Avoid writing neural_perfect_threshold_* every single loop."""
 	last = _last_threshold_written.get(tf_choice)
@@ -190,7 +193,6 @@ def write_threshold_sometimes(tf_choice, perfect_threshold, loop_i, every=200):
 		_last_threshold_written[tf_choice] = perfect_threshold
 	except:
 		pass
-
 def should_stop_training(loop_i, every=50):
 	"""Check killer.txt less often (still responsive, way less IO)."""
 	if loop_i % every != 0:
@@ -200,7 +202,6 @@ def should_stop_training(loop_i, every=50):
 			return f.read().strip().lower() == "yes"
 	except:
 		return False
-
 def PrintException():
 	exc_type, exc_obj, tb = sys.exc_info()
 	f = tb.tb_frame
@@ -214,7 +215,6 @@ number_of_candles = [2]
 number_of_candles_index = 0
 def restart_program():
 	"""Restarts the current program, with file objects and descriptors cleanup"""
-
 	try:
 		p = psutil.Process(os.getpid())
 		for handler in p.open_files() + p.connections():
@@ -226,7 +226,7 @@ def restart_program():
 try:
 	if restarted_yet > 2:
 		restarted_yet = 0
-	else:	
+	else:
 		pass
 except:
 	restarted_yet = 0
@@ -235,17 +235,13 @@ tf_minutes = [60, 120, 240, 480, 720, 1440, 10080]
 # --- GUI HUB INPUT (NO PROMPTS) ---
 # Usage: python pt_trainer.py BTC [reprocess_yes|reprocess_no]
 _arg_coin = "BTC"
-
 try:
 	if len(sys.argv) > 1 and str(sys.argv[1]).strip():
 		_arg_coin = str(sys.argv[1]).strip().upper()
 except Exception:
 	_arg_coin = "BTC"
-
 coin_choice = _arg_coin + '-USDT'
-
 restart_processing = "yes"
-
 # GUI reads this status file to know if this coin is TRAINING or FINISHED
 _trainer_started_at = int(time.time())
 try:
@@ -261,8 +257,6 @@ try:
 		)
 except Exception:
 	pass
-
-
 the_big_index = 0
 while True:
 	list_len = 0
@@ -276,11 +270,11 @@ while True:
 	high_var2 = 0.0
 	low_var2 = 0.0
 	last_flipped = 'no'
-	starting_amounth02 = 100.0
-	starting_amounth05 = 100.0
-	starting_amounth10 = 100.0
-	starting_amounth20 = 100.0
-	starting_amounth50 = 100.0
+	starting_amount02 = 100.0
+	starting_amount05 = 100.0
+	starting_amount10 = 100.0
+	starting_amount20 = 100.0
+	starting_amount50 = 100.0
 	starting_amount = 100.0
 	starting_amount1 = 100.0
 	starting_amount1_2 = 100.0
@@ -351,7 +345,6 @@ while True:
 	high_weight_list = _mem["high_weight_list"]
 	low_weight_list = _mem["low_weight_list"]
 	no_list = 'no' if len(memory_list) > 0 else 'yes'
-
 	tf_list = ['1hour',tf_choice,tf_choice]
 	choice_index = tf_choices.index(tf_choice)
 	minutes_list = [60,tf_minutes[choice_index],tf_minutes[choice_index]]
@@ -415,7 +408,7 @@ while True:
 				continue
 		perc_comp = format((len(history_list)/how_far_to_look_back)*100,'.2f')
 		print('gathering history')
-		current_change = len(history_list)-list_len	
+		current_change = len(history_list)-list_len
 		try:
 			print('\n\n\n\n')
 			print(current_change)
@@ -462,7 +455,7 @@ while True:
 				else:
 					pass
 				candle_time = float(working_minute[0].replace('[',''))
-				openPrice = float(working_minute[1])                
+				openPrice = float(working_minute[1])
 				closePrice = float(working_minute[2])
 				highPrice = float(working_minute[3])
 				lowPrice = float(working_minute[4])
@@ -508,7 +501,6 @@ while True:
 			all_current_patterns = []
 			memory_or_history = []
 			memory_weights = []
-
 			high_memory_weights = []
 			low_memory_weights = []
 			final_moves = 0.0
@@ -610,7 +602,6 @@ while True:
 				file = open('trainer_last_start_time.txt','w+')
 				file.write(str(start_time_yes))
 				file.close()
-
 				# Mark training finished for the GUI
 				try:
 					_trainer_finished_at = int(time.time())
@@ -633,10 +624,8 @@ while True:
 						)
 				except Exception:
 					pass
-
 				# Flush any cached memory/weights before we spin
 				flush_memory(tf_choice, force=True)
-
 				while True:
 					continue
 				the_big_index += 1
@@ -667,11 +656,11 @@ while True:
 				high_var2 = 0.0
 				low_var2 = 0.0
 				last_flipped = 'no'
-				starting_amounth02 = 100.0
-				starting_amounth05 = 100.0
-				starting_amounth10 = 100.0
-				starting_amounth20 = 100.0
-				starting_amounth50 = 100.0
+				starting_amount02 = 100.0
+				starting_amount05 = 100.0
+				starting_amount10 = 100.0
+				starting_amount20 = 100.0
+				starting_amount50 = 100.0
 				starting_amount = 100.0
 				starting_amount1 = 100.0
 				starting_amount1_2 = 100.0
@@ -756,7 +745,6 @@ while True:
 							file.close()
 						except:
 							pass
-
 						# Mark training finished for the GUI
 						try:
 							_trainer_finished_at = int(time.time())
@@ -779,13 +767,11 @@ while True:
 								)
 						except Exception:
 							pass
-
 						sys.exit(0)
 					else:
 						the_big_index = 0
 				else:
 					pass
-
 				break
 			else:
 				exited = 'no'
@@ -848,7 +834,7 @@ while True:
 							file.close()
 							file = open('memory_weights_'+tf_choice+'.txt','r')
 							weight_list = file.read().replace("'","").replace(',','').replace('"','').replace(']','').replace('[','').split(' ')
-							file.close()							
+							file.close()
 							file = open('memory_weights_high_'+tf_choice+'.txt','r')
 							high_weight_list = file.read().replace("'","").replace(',','').replace('"','').replace(']','').replace('[','').split(' ')
 							file.close()
@@ -977,7 +963,6 @@ while True:
 						else:
 							pass
 					write_threshold_sometimes(tf_choice, perfect_threshold, loop_i, every=200)
-
 					try:
 						index = 0
 						current_pattern_length = number_of_candles[number_of_candles_index]
@@ -992,7 +977,7 @@ while True:
 								if index >= len(price_list2):
 									break
 								else:
-									continue	
+									continue
 					except:
 						PrintException()
 					if 1==1:
@@ -1149,7 +1134,7 @@ while True:
 									break
 								else:
 									perdex += 1
-									if perdex >= len(perfect):                                                                        
+									if perdex >= len(perfect):
 										perfect_yes = 'no'
 										break
 									else:
@@ -1164,7 +1149,7 @@ while True:
 									if len(upordown4) > 100:
 										del upordown4[0]
 									else:
-										pass 
+										pass
 								elif low_percent_difference_of_actuals <= low_var2-(low_var2*0.005) and percent_difference_of_actuals > low_var2:
 									upordown.append(1)
 									upordown3.append(1)
@@ -1172,7 +1157,7 @@ while True:
 									if len(upordown4) > 100:
 										del upordown4[0]
 									else:
-										pass  									
+										pass
 								elif high_percent_difference_of_actuals >= high_var2+(high_var2*0.005) and percent_difference_of_actuals > high_var2:
 									upordown3.append(0)
 									upordown2.append(0)
@@ -1190,7 +1175,7 @@ while True:
 									if len(upordown4) > 100:
 										del upordown4[0]
 									else:
-										pass  
+										pass
 								else:
 									pass
 							else:
@@ -1263,7 +1248,7 @@ while True:
 						while True:
 							try:
 								try:
-									price_list_length += 1		
+									price_list_length += 1
 									which_candle_of_the_prediction_index += 1
 									try:
 										if len(price_list2)>=int(len(price_list)*0.25) and restarted_yet < 2:
@@ -1304,11 +1289,11 @@ while True:
 										high_var2 = 0.0
 										low_var2 = 0.0
 										last_flipped = 'no'
-										starting_amounth02 = 100.0
-										starting_amounth05 = 100.0
-										starting_amounth10 = 100.0
-										starting_amounth20 = 100.0
-										starting_amounth50 = 100.0
+										starting_amount02 = 100.0
+										starting_amount05 = 100.0
+										starting_amount10 = 100.0
+										starting_amount20 = 100.0
+										starting_amount50 = 100.0
 										starting_amount = 100.0
 										starting_amount1 = 100.0
 										starting_amount1_2 = 100.0
@@ -1387,7 +1372,6 @@ while True:
 													file.close()
 												except:
 													pass
-
 												# Mark training finished for the GUI
 												try:
 													_trainer_finished_at = int(time.time())
@@ -1410,7 +1394,6 @@ while True:
 														)
 												except Exception:
 													pass
-
 												sys.exit(0)
 											else:
 												the_big_index = 0
@@ -1460,7 +1443,7 @@ while True:
 											difference_list = []
 											list_of_predictions = all_predictions
 											close_enough_counter = []
-											which_pattern_length_index = 0								
+											which_pattern_length_index = 0
 											while True:
 												current_prediction_price = all_predictions[highlowind][which_candle_of_the_prediction_index]
 												high_current_prediction_price = high_all_predictions[highlowind][which_candle_of_the_prediction_index]
@@ -1530,15 +1513,12 @@ while True:
 															high_weight_list.insert(perfect_dexs[indy],high_new_weight)
 															del low_weight_list[perfect_dexs[indy]]
 															low_weight_list.insert(perfect_dexs[indy],low_new_weight)
-
 															# mark dirty (we will flush in batches)
 															_mem = load_memory(tf_choice)
 															_mem["dirty"] = True
-
 															# occasional batch flush
 															if loop_i % 200 == 0:
 																flush_memory(tf_choice)
-
 															indy += 1
 															if indy >= len(unweighted):
 																break
@@ -1547,24 +1527,20 @@ while True:
 													except:
 														PrintException()
 														all_current_patterns[highlowind].append(this_diff)
-
 														# build the same memory entry format, but store in RAM
 														mem_entry = str(all_current_patterns[highlowind]).replace("'","").replace(',','').replace('"','').replace(']','').replace('[','')+'{}'+str(high_this_diff)+'{}'+str(low_this_diff)
-
 														_mem = load_memory(tf_choice)
 														_mem["memory_list"].append(mem_entry)
 														_mem["weight_list"].append('1.0')
 														_mem["high_weight_list"].append('1.0')
 														_mem["low_weight_list"].append('1.0')
 														_mem["dirty"] = True
-
 														# occasional batch flush
 														if loop_i % 200 == 0:
 															flush_memory(tf_choice)
-
 												except:
 													PrintException()
-													pass										
+													pass
 												highlowind += 1
 												if highlowind >= len(all_predictions):
 													break
