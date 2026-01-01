@@ -287,6 +287,17 @@ DEFAULT_SETTINGS = {
     "script_neural_trainer": "pt_trainer.py",
     "script_trader": "pt_trader.py",
     "auto_start_scripts": False,
+    "trade_settings": {
+        "max_dca_per_24h": 2,
+        "dca_window_hours": 24,
+        "initial_position_size_pct": 0.00005,
+        "initial_position_min_usd": 0.5,
+        "dca_multiplier": 2.0,
+        "dca_percentage_levels": [-2.5, -5.0, -10.0, -20.0, -30.0, -40.0, -50.0],
+        "pm_start_pct_no_dca": 5.0,
+        "pm_start_pct_with_dca": 2.5,
+        "trailing_gap_pct": 0.5,
+    },
 }
 
 
@@ -1892,6 +1903,7 @@ class PowerTraderHub(tk.Tk):
             activeforeground=DARK_SELECT_FG,
         )
         m_settings.add_command(label="Settings...", command=self.open_settings_dialog)
+        m_settings.add_command(label="Trade Settings...", command=self.open_trade_settings_dialog)
         menubar.add_cascade(label="Settings", menu=m_settings)
 
         m_file = tk.Menu(
@@ -5035,6 +5047,213 @@ class PowerTraderHub(tk.Tk):
         ttk.Button(btns, text="Save", command=save).pack(side="left")
         ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="left", padx=8)
 
+    def open_trade_settings_dialog(self) -> None:
+        """Open Trade Settings dialog for configuring risk management and position sizing."""
+        win = tk.Toplevel(self)
+        win.title("Trade Settings")
+        win.geometry("700x600")
+        win.minsize(600, 500)
+        win.configure(bg=DARK_BG)
+
+        # Scrollable settings content
+        viewport = ttk.Frame(win)
+        viewport.pack(fill="both", expand=True, padx=12, pady=12)
+        viewport.grid_rowconfigure(0, weight=1)
+        viewport.grid_columnconfigure(0, weight=1)
+
+        settings_canvas = tk.Canvas(
+            viewport,
+            bg=DARK_BG,
+            highlightthickness=1,
+            highlightbackground=DARK_BORDER,
+            bd=0,
+        )
+        settings_canvas.grid(row=0, column=0, sticky="nsew")
+
+        settings_scroll = ttk.Scrollbar(
+            viewport,
+            orient="vertical",
+            command=settings_canvas.yview,
+        )
+        settings_scroll.grid(row=0, column=1, sticky="ns")
+
+        settings_canvas.configure(yscrollcommand=settings_scroll.set)
+
+        frm = ttk.Frame(settings_canvas)
+        settings_window = settings_canvas.create_window((0, 0), window=frm, anchor="nw")
+
+        def _update_settings_scrollbars(event=None) -> None:
+            try:
+                c = settings_canvas
+                win_id = settings_window
+
+                c.update_idletasks()
+                bbox = c.bbox(win_id)
+                if not bbox:
+                    settings_scroll.grid_remove()
+                    return
+
+                c.configure(scrollregion=bbox)
+                content_h = int(bbox[3] - bbox[1])
+                view_h = int(c.winfo_height())
+
+                if content_h > (view_h + 1):
+                    settings_scroll.grid()
+                else:
+                    settings_scroll.grid_remove()
+                    try:
+                        c.yview_moveto(0)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        def _on_settings_canvas_configure(e) -> None:
+            try:
+                settings_canvas.itemconfigure(settings_window, width=int(e.width))
+            except Exception:
+                pass
+            _update_settings_scrollbars()
+
+        settings_canvas.bind("<Configure>", _on_settings_canvas_configure, add="+")
+        frm.bind("<Configure>", _update_settings_scrollbars, add="+")
+
+        def _wheel(e):
+            try:
+                if settings_scroll.winfo_ismapped():
+                    settings_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+            except Exception:
+                pass
+
+        settings_canvas.bind("<Enter>", lambda _e: settings_canvas.focus_set(), add="+")
+        settings_canvas.bind("<MouseWheel>", _wheel, add="+")
+        settings_canvas.bind("<Button-4>", lambda _e: settings_canvas.yview_scroll(-3, "units"), add="+")
+        settings_canvas.bind("<Button-5>", lambda _e: settings_canvas.yview_scroll(3, "units"), add="+")
+
+        # Make the entry column expand
+        frm.columnconfigure(0, weight=0)  # labels
+        frm.columnconfigure(1, weight=1)  # entries
+
+        # Get current trade settings with defaults
+        trade_settings = self.settings.get("trade_settings", {})
+        defaults = DEFAULT_SETTINGS.get("trade_settings", {})
+
+        def get_setting(key: str, default_value):
+            return trade_settings.get(key, defaults.get(key, default_value))
+
+        # Create variables for all settings
+        max_dca_var = tk.StringVar(value=str(get_setting("max_dca_per_24h", 2)))
+        dca_window_var = tk.StringVar(value=str(get_setting("dca_window_hours", 24)))
+        position_size_var = tk.StringVar(value=str(get_setting("initial_position_size_pct", 0.00005)))
+        position_min_var = tk.StringVar(value=str(get_setting("initial_position_min_usd", 0.5)))
+        dca_multiplier_var = tk.StringVar(value=str(get_setting("dca_multiplier", 2.0)))
+        dca_levels_var = tk.StringVar(value=", ".join([str(x) for x in get_setting("dca_percentage_levels", [-2.5, -5.0, -10.0, -20.0, -30.0, -40.0, -50.0])]))
+        pm_no_dca_var = tk.StringVar(value=str(get_setting("pm_start_pct_no_dca", 5.0)))
+        pm_with_dca_var = tk.StringVar(value=str(get_setting("pm_start_pct_with_dca", 2.5)))
+        trailing_gap_var = tk.StringVar(value=str(get_setting("trailing_gap_pct", 0.5)))
+
+        def add_row(r: int, label: str, var: tk.StringVar, help_text: str = ""):
+            ttk.Label(frm, text=label).grid(row=r, column=0, sticky="w", padx=(0, 10), pady=6)
+            ent = ttk.Entry(frm, textvariable=var)
+            ent.grid(row=r, column=1, sticky="ew", pady=6)
+            if help_text:
+                help_lbl = ttk.Label(frm, text=help_text, font=("TkDefaultFont", 8), foreground=DARK_MUTED)
+                help_lbl.grid(row=r, column=0, columnspan=2, sticky="w", padx=(0, 10), pady=(0, 6))
+
+        r = 0
+        ttk.Label(frm, text="DCA (Dollar Cost Averaging) Settings", font=("TkDefaultFont", 10, "bold")).grid(row=r, column=0, columnspan=2, sticky="w", pady=(0, 10)); r += 1
+
+        add_row(r, "Max DCA per 24 hours:", max_dca_var, "Maximum number of DCA buys allowed per coin in a rolling 24-hour window"); r += 1
+        add_row(r, "DCA window duration (hours):", dca_window_var, "Rolling window duration for DCA rate limiting"); r += 1
+        add_row(r, "DCA multiplier:", dca_multiplier_var, "Multiplier for DCA amount (e.g., 2.0 = 2x current position value)"); r += 1
+        add_row(r, "DCA percentage levels:", dca_levels_var, "Comma-separated drawdown percentages that trigger DCA buys (e.g., -2.5, -5.0, -10.0)"); r += 1
+
+        ttk.Separator(frm, orient="horizontal").grid(row=r, column=0, columnspan=2, sticky="ew", pady=10); r += 1
+
+        ttk.Label(frm, text="Position Sizing Settings", font=("TkDefaultFont", 10, "bold")).grid(row=r, column=0, columnspan=2, sticky="w", pady=(0, 10)); r += 1
+
+        add_row(r, "Initial position size (% of account per coin):", position_size_var, "Percentage of total account value allocated to each new trade (e.g., 0.00005 = 0.005%)"); r += 1
+        add_row(r, "Initial position minimum (USD):", position_min_var, "Minimum USD amount for initial position (prevents tiny allocations)"); r += 1
+
+        ttk.Separator(frm, orient="horizontal").grid(row=r, column=0, columnspan=2, sticky="ew", pady=10); r += 1
+
+        ttk.Label(frm, text="Profit Margin Settings", font=("TkDefaultFont", 10, "bold")).grid(row=r, column=0, columnspan=2, sticky="w", pady=(0, 10)); r += 1
+
+        add_row(r, "Profit margin start - no DCA (%):", pm_no_dca_var, "Profit margin line when no DCA has occurred on the trade"); r += 1
+        add_row(r, "Profit margin start - with DCA (%):", pm_with_dca_var, "Profit margin line when any DCA has occurred on the trade"); r += 1
+        add_row(r, "Trailing gap percentage (%):", trailing_gap_var, "Gap percentage for trailing profit margin (how far behind peak the line trails)"); r += 1
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=r, column=0, columnspan=2, sticky="ew", pady=14)
+        btns.columnconfigure(0, weight=1)
+
+        def save():
+            try:
+                # Validation
+                def validate_int(value: str, min_val: int = 1) -> int:
+                    try:
+                        val = int(float(value))
+                        if val < min_val:
+                            raise ValueError(f"Must be >= {min_val}")
+                        return val
+                    except (ValueError, TypeError):
+                        raise ValueError(f"Must be a valid integer >= {min_val}")
+
+                def validate_float(value: str, min_val: float = 0.0) -> float:
+                    try:
+                        val = float(value)
+                        if val < min_val:
+                            raise ValueError(f"Must be >= {min_val}")
+                        return val
+                    except (ValueError, TypeError):
+                        raise ValueError(f"Must be a valid number >= {min_val}")
+
+                def validate_dca_levels(value: str) -> list:
+                    try:
+                        parts = [x.strip() for x in value.split(",") if x.strip()]
+                        levels = [float(x) for x in parts]
+                        if not all(x < 0 for x in levels):
+                            raise ValueError("All DCA percentage levels must be negative")
+                        return levels
+                    except (ValueError, TypeError) as e:
+                        raise ValueError(f"Invalid DCA levels format. Use comma-separated negative numbers (e.g., -2.5, -5.0, -10.0): {e}")
+
+                # Validate and convert all values
+                max_dca = validate_int(max_dca_var.get(), 1)
+                dca_window = validate_int(dca_window_var.get(), 1)
+                position_size = validate_float(position_size_var.get(), 0.0)
+                position_min = validate_float(position_min_var.get(), 0.0)
+                dca_multiplier = validate_float(dca_multiplier_var.get(), 0.0)
+                dca_levels = validate_dca_levels(dca_levels_var.get())
+                pm_no_dca = validate_float(pm_no_dca_var.get(), 0.0)
+                pm_with_dca = validate_float(pm_with_dca_var.get(), 0.0)
+                trailing_gap = validate_float(trailing_gap_var.get(), 0.0)
+
+                # Save to settings
+                if "trade_settings" not in self.settings:
+                    self.settings["trade_settings"] = {}
+                
+                self.settings["trade_settings"]["max_dca_per_24h"] = max_dca
+                self.settings["trade_settings"]["dca_window_hours"] = dca_window
+                self.settings["trade_settings"]["initial_position_size_pct"] = position_size
+                self.settings["trade_settings"]["initial_position_min_usd"] = position_min
+                self.settings["trade_settings"]["dca_multiplier"] = dca_multiplier
+                self.settings["trade_settings"]["dca_percentage_levels"] = dca_levels
+                self.settings["trade_settings"]["pm_start_pct_no_dca"] = pm_no_dca
+                self.settings["trade_settings"]["pm_start_pct_with_dca"] = pm_with_dca
+                self.settings["trade_settings"]["trailing_gap_pct"] = trailing_gap
+
+                self._save_settings()
+                messagebox.showinfo("Saved", "Trade settings saved. Changes will take effect on the next trader iteration.")
+                win.destroy()
+
+            except ValueError as e:
+                messagebox.showerror("Validation Error", f"Invalid input:\n{e}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save trade settings:\n{e}")
+
+        ttk.Button(btns, text="Save", command=save).pack(side="left")
+        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="left", padx=8)
 
     # ---- close ----
 

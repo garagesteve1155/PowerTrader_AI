@@ -42,6 +42,7 @@ _gui_settings_cache = {
 	"mtime": None,
 	"coins": ['BTC', 'ETH', 'XRP', 'BNB', 'DOGE'],  # fallback defaults
 	"main_neural_dir": None,
+	"trade_settings": None,
 }
 
 def _load_gui_settings() -> dict:
@@ -49,6 +50,7 @@ def _load_gui_settings() -> dict:
 	Reads gui_settings.json and returns a dict with:
 	- coins: uppercased list
 	- main_neural_dir: string (may be None)
+	- trade_settings: dict with trading parameters (may be None)
 	Caches by mtime so it is cheap to call frequently.
 	"""
 	try:
@@ -75,14 +77,21 @@ def _load_gui_settings() -> dict:
 		else:
 			main_neural_dir = None
 
+		# Load trade_settings with defaults
+		trade_settings = data.get("trade_settings", None)
+		if not isinstance(trade_settings, dict):
+			trade_settings = None
+
 		_gui_settings_cache["mtime"] = mtime
 		_gui_settings_cache["coins"] = coins
 		_gui_settings_cache["main_neural_dir"] = main_neural_dir
+		_gui_settings_cache["trade_settings"] = trade_settings
 
 		return {
 			"mtime": mtime,
 			"coins": list(coins),
 			"main_neural_dir": main_neural_dir,
+			"trade_settings": trade_settings,
 		}
 	except Exception:
 		return dict(_gui_settings_cache)
@@ -183,15 +192,18 @@ class CryptoAPITrading:
         self.private_key = SigningKey(private_key_seed)
         self.base_url = "https://trading.robinhood.com"
 
+        # Load trade settings from GUI (with defaults)
+        trade_settings = _load_trade_settings()
+        
         self.dca_levels_triggered = {}  # Track DCA levels for each crypto
-        self.dca_levels = [-2.5, -5.0, -10.0, -20.0, -30.0, -40.0, -50.0]  # Moved to instance variable
+        self.dca_levels = trade_settings.get("dca_percentage_levels", [-2.5, -5.0, -10.0, -20.0, -30.0, -40.0, -50.0])
 
         # --- Trailing profit margin (per-coin state) ---
         # Each coin keeps its own trailing PM line, peak, and "was above line" flag.
         self.trailing_pm = {}  # { "BTC": {"active": bool, "line": float, "peak": float, "was_above": bool}, ... }
-        self.trailing_gap_pct = 0.5  # 0.5% trail gap behind peak
-        self.pm_start_pct_no_dca = 5.0
-        self.pm_start_pct_with_dca = 2.5
+        self.trailing_gap_pct = trade_settings.get("trailing_gap_pct", 0.5)
+        self.pm_start_pct_no_dca = trade_settings.get("pm_start_pct_no_dca", 5.0)
+        self.pm_start_pct_with_dca = trade_settings.get("pm_start_pct_with_dca", 2.5)
 
         self.cost_basis = self.calculate_cost_basis()  # Initialize cost basis at startup
         self.initialize_dca_levels()  # Initialize DCA levels based on historical buy orders
@@ -212,10 +224,16 @@ class CryptoAPITrading:
         }
 
         # --- DCA rate-limit (per trade, per coin, rolling 24h window) ---
-        self.max_dca_buys_per_24h = 2
-        self.dca_window_seconds = 24 * 60 * 60
+        self.max_dca_buys_per_24h = trade_settings.get("max_dca_per_24h", 2)
+        dca_window_hours = trade_settings.get("dca_window_hours", 24)
+        self.dca_window_seconds = int(dca_window_hours * 60 * 60)
         self._dca_buy_ts = {}         # { "BTC": [ts, ts, ...] } (DCA buys only)
         self._dca_last_sell_ts = {}   # { "BTC": ts_of_last_sell }
+        
+        # Store trade settings for hot-reload
+        self._trade_settings = trade_settings
+        self._last_trade_settings_mtime = None
+        
         self._seed_dca_window_from_history()
 
 
@@ -907,6 +925,25 @@ class CryptoAPITrading:
         except Exception:
             pass
 
+        # Hot-reload trade settings from GUI settings while running
+        try:
+            settings = _load_gui_settings()
+            mtime = settings.get("mtime")
+            if mtime is not None and mtime != self._last_trade_settings_mtime:
+                new_trade_settings = _load_trade_settings()
+                if new_trade_settings != self._trade_settings:
+                    self._trade_settings = new_trade_settings
+                    self.max_dca_buys_per_24h = new_trade_settings.get("max_dca_per_24h", 2)
+                    dca_window_hours = new_trade_settings.get("dca_window_hours", 24)
+                    self.dca_window_seconds = int(dca_window_hours * 60 * 60)
+                    self.dca_levels = new_trade_settings.get("dca_percentage_levels", [-2.5, -5.0, -10.0, -20.0, -30.0, -40.0, -50.0])
+                    self.trailing_gap_pct = new_trade_settings.get("trailing_gap_pct", 0.5)
+                    self.pm_start_pct_no_dca = new_trade_settings.get("pm_start_pct_no_dca", 5.0)
+                    self.pm_start_pct_with_dca = new_trade_settings.get("pm_start_pct_with_dca", 2.5)
+                    self._last_trade_settings_mtime = mtime
+        except Exception:
+            pass
+
         # Fetch account details
         account = self.get_account()
         # Fetch holdings
@@ -1283,7 +1320,8 @@ class CryptoAPITrading:
                 print(f"  DCAing {symbol} (stage {current_stage + 1}) via {reason}.")
 
                 print(f"  Current Value: ${value:.2f}")
-                dca_amount = value * 2
+                dca_multiplier = self._trade_settings.get("dca_multiplier", 2.0)
+                dca_amount = value * dca_multiplier
                 print(f"  DCA Amount: ${dca_amount:.2f}")
                 print(f"  Buying Power: ${buying_power:.2f}")
 
@@ -1377,9 +1415,11 @@ class CryptoAPITrading:
 
 
 
-        allocation_in_usd = total_account_value * (0.00005/len(crypto_symbols))
-        if allocation_in_usd < 0.5:
-            allocation_in_usd = 0.5
+        position_size_pct = self._trade_settings.get("initial_position_size_pct", 0.00005)
+        position_min_usd = self._trade_settings.get("initial_position_min_usd", 0.5)
+        allocation_in_usd = total_account_value * (position_size_pct / len(crypto_symbols))
+        if allocation_in_usd < position_min_usd:
+            allocation_in_usd = position_min_usd
 
         holding_full_symbols = [f"{h['asset_code']}-USD" for h in holdings.get("results", [])]
 
