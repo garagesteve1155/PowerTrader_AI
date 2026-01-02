@@ -271,6 +271,7 @@ class NeuralSignalTile(ttk.Frame):
 # -----------------------------
 
 DEFAULT_SETTINGS = {
+    "broker": "robinhood",  # 'robinhood' or 'bitvavo'
     "main_neural_dir": r"C:\PowerTrader_AI",
     "coins": ["BTC", "ETH", "XRP", "BNB", "DOGE"],
     "default_timeframe": "1hour",
@@ -4344,6 +4345,7 @@ class PowerTraderHub(tk.Tk):
         main_dir_var = tk.StringVar(value=self.settings["main_neural_dir"])
         coins_var = tk.StringVar(value=",".join(self.settings["coins"]))
         hub_dir_var = tk.StringVar(value=self.settings.get("hub_data_dir", ""))
+        broker_var = tk.StringVar(value=self.settings.get("broker", "robinhood"))
 
         neural_script_var = tk.StringVar(value=self.settings["script_neural_runner2"])
         trainer_script_var = tk.StringVar(value=self.settings.get("script_neural_trainer", "pt_trainer.py"))
@@ -4355,6 +4357,14 @@ class PowerTraderHub(tk.Tk):
         auto_start_var = tk.BooleanVar(value=bool(self.settings.get("auto_start_scripts", False)))
 
         r = 0
+
+        # Broker selection dropdown
+        ttk.Label(frm, text="Broker:").grid(row=r, column=0, sticky="w", padx=(0, 10), pady=6)
+        broker_combo = ttk.Combobox(frm, textvariable=broker_var, values=["robinhood", "bitvavo"], state="readonly", width=20)
+        broker_combo.grid(row=r, column=1, sticky="w", pady=6)
+        ttk.Label(frm, text="").grid(row=r, column=2, sticky="e", padx=(10, 0), pady=6)
+        r += 1
+
         add_row(r, "Main neural folder:", main_dir_var, browse="dir"); r += 1
         add_row(r, "Coins (comma):", coins_var); r += 1
         add_row(r, "Hub data dir (optional):", hub_dir_var, browse="dir"); r += 1
@@ -4959,6 +4969,153 @@ class PowerTraderHub(tk.Tk):
 
         _refresh_api_status()
 
+        # --- Bitvavo API setup (writes b_key.txt + b_secret.txt used by pt_trader.py) ---
+        def _bitvavo_api_paths() -> Tuple[str, str]:
+            key_path = os.path.join(self.project_dir, "b_key.txt")
+            secret_path = os.path.join(self.project_dir, "b_secret.txt")
+            return key_path, secret_path
+
+        def _read_bitvavo_api_files() -> Tuple[str, str]:
+            key_path, secret_path = _bitvavo_api_paths()
+            try:
+                with open(key_path, "r", encoding="utf-8") as f:
+                    k = (f.read() or "").strip()
+            except Exception:
+                k = ""
+            try:
+                with open(secret_path, "r", encoding="utf-8") as f:
+                    s = (f.read() or "").strip()
+            except Exception:
+                s = ""
+            return k, s
+
+        bitvavo_status_var = tk.StringVar(value="")
+
+        def _refresh_bitvavo_status() -> None:
+            key_path, secret_path = _bitvavo_api_paths()
+            k, s = _read_bitvavo_api_files()
+
+            missing = []
+            if not k:
+                missing.append("b_key.txt (API Key)")
+            if not s:
+                missing.append("b_secret.txt (API Secret)")
+
+            if missing:
+                bitvavo_status_var.set("Not configured ❌ (missing " + ", ".join(missing) + ")")
+            else:
+                bitvavo_status_var.set("Configured ✅ (credentials found)")
+
+        def _open_bitvavo_api_wizard() -> None:
+            """Simple wizard to set up Bitvavo API credentials."""
+            import webbrowser
+
+            wiz = tk.Toplevel(win)
+            wiz.title("Bitvavo API Setup")
+            wiz.geometry("600x400")
+            wiz.minsize(500, 350)
+            wiz.configure(bg=DARK_BG)
+
+            container = ttk.Frame(wiz)
+            container.pack(fill="both", expand=True, padx=20, pady=20)
+            container.columnconfigure(0, weight=1)
+
+            key_path, secret_path = _bitvavo_api_paths()
+            existing_key, existing_secret = _read_bitvavo_api_files()
+
+            # Instructions
+            ttk.Label(
+                container,
+                text="Bitvavo API Setup",
+                font=("TkDefaultFont", 14, "bold")
+            ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+
+            ttk.Label(
+                container,
+                text="1. Go to Bitvavo → Settings → API Keys\n"
+                     "2. Create a new API key with trading permissions\n"
+                     "3. Copy the API Key and Secret below",
+                justify="left"
+            ).grid(row=1, column=0, sticky="w", pady=(0, 15))
+
+            def open_bitvavo_page():
+                webbrowser.open("https://account.bitvavo.com/user/api")
+
+            ttk.Button(container, text="Open Bitvavo API page", command=open_bitvavo_page).grid(row=2, column=0, sticky="w", pady=(0, 15))
+
+            # API Key input
+            ttk.Label(container, text="API Key:").grid(row=3, column=0, sticky="w")
+            api_key_var = tk.StringVar(value=existing_key)
+            api_key_entry = ttk.Entry(container, textvariable=api_key_var, width=60)
+            api_key_entry.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+
+            # API Secret input
+            ttk.Label(container, text="API Secret:").grid(row=5, column=0, sticky="w")
+            api_secret_var = tk.StringVar(value=existing_secret)
+            api_secret_entry = ttk.Entry(container, textvariable=api_secret_var, width=60, show="*")
+            api_secret_entry.grid(row=6, column=0, sticky="ew", pady=(0, 20))
+
+            def do_save():
+                key = api_key_var.get().strip()
+                secret = api_secret_var.get().strip()
+
+                if not key or not secret:
+                    messagebox.showerror("Missing credentials", "Please enter both API Key and API Secret.")
+                    return
+
+                try:
+                    with open(key_path, "w", encoding="utf-8") as f:
+                        f.write(key)
+                    with open(secret_path, "w", encoding="utf-8") as f:
+                        f.write(secret)
+                except Exception as e:
+                    messagebox.showerror("Save failed", f"Could not save credentials:\n\n{e}")
+                    return
+
+                _refresh_bitvavo_status()
+                messagebox.showinfo("Saved", "Bitvavo API credentials saved successfully!")
+                wiz.destroy()
+
+            btns = ttk.Frame(container)
+            btns.grid(row=7, column=0, sticky="ew")
+            ttk.Button(btns, text="Save", command=do_save).pack(side="left")
+            ttk.Button(btns, text="Cancel", command=wiz.destroy).pack(side="left", padx=8)
+
+        def _clear_bitvavo_api_files() -> None:
+            """Delete b_key.txt / b_secret.txt."""
+            key_path, secret_path = _bitvavo_api_paths()
+            if not messagebox.askyesno(
+                "Delete Bitvavo credentials?",
+                f"This will delete:\n  {key_path}\n  {secret_path}\n\nAre you sure?"
+            ):
+                return
+
+            try:
+                if os.path.isfile(key_path):
+                    os.remove(key_path)
+                if os.path.isfile(secret_path):
+                    os.remove(secret_path)
+            except Exception as e:
+                messagebox.showerror("Delete failed", f"Couldn't delete the files:\n\n{e}")
+                return
+
+            _refresh_bitvavo_status()
+            messagebox.showinfo("Deleted", "Deleted b_key.txt and b_secret.txt.")
+
+        ttk.Label(frm, text="Bitvavo API:").grid(row=r, column=0, sticky="w", padx=(0, 10), pady=6)
+
+        bitvavo_row = ttk.Frame(frm)
+        bitvavo_row.grid(row=r, column=1, columnspan=2, sticky="ew", pady=6)
+        bitvavo_row.columnconfigure(0, weight=1)
+
+        ttk.Label(bitvavo_row, textvariable=bitvavo_status_var).grid(row=0, column=0, sticky="w")
+        ttk.Button(bitvavo_row, text="Setup", command=_open_bitvavo_api_wizard).grid(row=0, column=1, sticky="e", padx=(10, 0))
+        ttk.Button(bitvavo_row, text="Clear", command=_clear_bitvavo_api_files).grid(row=0, column=2, sticky="e", padx=(8, 0))
+
+        r += 1
+
+        _refresh_bitvavo_status()
+
 
         ttk.Separator(frm, orient="horizontal").grid(row=r, column=0, columnspan=3, sticky="ew", pady=10); r += 1
 
@@ -4979,6 +5136,7 @@ class PowerTraderHub(tk.Tk):
                 # Track coins before changes so we can detect newly added coins
                 prev_coins = set([str(c).strip().upper() for c in (self.settings.get("coins") or []) if str(c).strip()])
 
+                self.settings["broker"] = broker_var.get().strip().lower()
                 self.settings["main_neural_dir"] = main_dir_var.get().strip()
                 self.settings["coins"] = [c.strip().upper() for c in coins_var.get().split(",") if c.strip()]
                 self.settings["hub_data_dir"] = hub_dir_var.get().strip()
