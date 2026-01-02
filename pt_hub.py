@@ -272,6 +272,8 @@ class NeuralSignalTile(ttk.Frame):
 
 DEFAULT_SETTINGS = {
     "broker": "robinhood",  # 'robinhood' or 'bitvavo'
+    "paper_trading": False,  # True to simulate trades without real money
+    "paper_balance": 10000.0,  # Starting balance for paper trading
     "main_neural_dir": r"C:\PowerTrader_AI",
     "coins": ["BTC", "ETH", "XRP", "BNB", "DOGE"],
     "default_timeframe": "1hour",
@@ -4346,6 +4348,8 @@ class PowerTraderHub(tk.Tk):
         coins_var = tk.StringVar(value=",".join(self.settings["coins"]))
         hub_dir_var = tk.StringVar(value=self.settings.get("hub_data_dir", ""))
         broker_var = tk.StringVar(value=self.settings.get("broker", "robinhood"))
+        paper_trading_var = tk.BooleanVar(value=bool(self.settings.get("paper_trading", False)))
+        paper_balance_var = tk.StringVar(value=str(self.settings.get("paper_balance", 10000.0)))
 
         neural_script_var = tk.StringVar(value=self.settings["script_neural_runner2"])
         trainer_script_var = tk.StringVar(value=self.settings.get("script_neural_trainer", "pt_trainer.py"))
@@ -4363,6 +4367,24 @@ class PowerTraderHub(tk.Tk):
         broker_combo = ttk.Combobox(frm, textvariable=broker_var, values=["robinhood", "bitvavo"], state="readonly", width=20)
         broker_combo.grid(row=r, column=1, sticky="w", pady=6)
         ttk.Label(frm, text="").grid(row=r, column=2, sticky="e", padx=(10, 0), pady=6)
+        r += 1
+
+        # Paper trading options
+        paper_frame = ttk.Frame(frm)
+        paper_frame.grid(row=r, column=0, columnspan=3, sticky="ew", pady=6)
+
+        paper_chk = ttk.Checkbutton(
+            paper_frame,
+            text="Paper Trading (simulate without real money)",
+            variable=paper_trading_var
+        )
+        paper_chk.pack(side="left")
+
+        ttk.Label(paper_frame, text="  Balance:").pack(side="left", padx=(20, 5))
+        paper_bal_entry = ttk.Entry(paper_frame, textvariable=paper_balance_var, width=12)
+        paper_bal_entry.pack(side="left")
+        ttk.Label(paper_frame, text="EUR/USD").pack(side="left", padx=(5, 0))
+
         r += 1
 
         add_row(r, "Main neural folder:", main_dir_var, browse="dir"); r += 1
@@ -5137,6 +5159,11 @@ class PowerTraderHub(tk.Tk):
                 prev_coins = set([str(c).strip().upper() for c in (self.settings.get("coins") or []) if str(c).strip()])
 
                 self.settings["broker"] = broker_var.get().strip().lower()
+                self.settings["paper_trading"] = bool(paper_trading_var.get())
+                try:
+                    self.settings["paper_balance"] = float(paper_balance_var.get().strip())
+                except ValueError:
+                    self.settings["paper_balance"] = 10000.0
                 self.settings["main_neural_dir"] = main_dir_var.get().strip()
                 self.settings["coins"] = [c.strip().upper() for c in coins_var.get().split(",") if c.strip()]
                 self.settings["hub_data_dir"] = hub_dir_var.get().strip()

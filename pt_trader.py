@@ -46,6 +46,8 @@ _gui_settings_cache = {
 	"coins": ['BTC', 'ETH', 'XRP', 'BNB', 'DOGE'],  # fallback defaults
 	"main_neural_dir": None,
 	"broker": "robinhood",  # 'robinhood' or 'bitvavo'
+	"paper_trading": False,
+	"paper_balance": 10000.0,
 }
 
 def _load_gui_settings() -> dict:
@@ -84,16 +86,27 @@ def _load_gui_settings() -> dict:
 		if broker not in ("robinhood", "bitvavo"):
 			broker = "robinhood"
 
+		# Load paper trading settings
+		paper_trading = bool(data.get("paper_trading", False))
+		try:
+			paper_balance = float(data.get("paper_balance", 10000.0))
+		except (ValueError, TypeError):
+			paper_balance = 10000.0
+
 		_gui_settings_cache["mtime"] = mtime
 		_gui_settings_cache["coins"] = coins
 		_gui_settings_cache["main_neural_dir"] = main_neural_dir
 		_gui_settings_cache["broker"] = broker
+		_gui_settings_cache["paper_trading"] = paper_trading
+		_gui_settings_cache["paper_balance"] = paper_balance
 
 		return {
 			"mtime": mtime,
 			"coins": list(coins),
 			"main_neural_dir": main_neural_dir,
 			"broker": broker,
+			"paper_trading": paper_trading,
+			"paper_balance": paper_balance,
 		}
 	except Exception:
 		return dict(_gui_settings_cache)
@@ -167,16 +180,24 @@ def _get_configured_broker() -> BrokerAPI:
     """Load and return the configured broker instance."""
     settings = _load_gui_settings()
     broker_name = settings.get("broker", "robinhood")
+    paper_trading = settings.get("paper_trading", False)
+    paper_balance = settings.get("paper_balance", 10000.0)
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    return get_broker(broker_name, base_dir)
+    return get_broker(
+        broker_name,
+        base_dir,
+        paper_trading=paper_trading,
+        paper_balance=paper_balance,
+    )
 
 # Initialize broker (will be reloaded if settings change)
 _current_broker: Optional[BrokerAPI] = None
 _current_broker_name: Optional[str] = None
+_current_paper_trading: Optional[bool] = None
 
 class CryptoAPITrading:
     def __init__(self):
-        global _current_broker, _current_broker_name
+        global _current_broker, _current_broker_name, _current_paper_trading
 
         # keep a copy of the folder map (same idea as trader.py)
         self.path_map = dict(base_paths)
@@ -184,14 +205,22 @@ class CryptoAPITrading:
         # Load broker from settings
         settings = _load_gui_settings()
         broker_name = settings.get("broker", "robinhood")
+        paper_trading = settings.get("paper_trading", False)
 
-        # Initialize or reuse broker
-        if _current_broker is None or _current_broker_name != broker_name:
+        # Initialize or reuse broker (reload if broker or paper mode changed)
+        if (_current_broker is None or
+            _current_broker_name != broker_name or
+            _current_paper_trading != paper_trading):
             _current_broker = _get_configured_broker()
             _current_broker_name = broker_name
+            _current_paper_trading = paper_trading
+            if paper_trading:
+                print(f"\n[PowerTrader] 📝 PAPER TRADING MODE - No real trades will be executed")
+                print(f"[PowerTrader] Starting balance: {settings.get('paper_balance', 10000.0):.2f} {_current_broker.base_currency}\n")
 
         self.broker = _current_broker
         self.broker_name = broker_name
+        self.paper_trading = paper_trading
 
         self.dca_levels_triggered = {}  # Track DCA levels for each crypto
         self.dca_levels = [-2.5, -5.0, -10.0, -20.0, -30.0, -40.0, -50.0]  # Moved to instance variable

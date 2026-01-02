@@ -9,22 +9,30 @@ from typing import Optional
 from .base import BrokerAPI
 from .robinhood import RobinhoodBroker
 from .bitvavo import BitvavoBroker
+from .paper import PaperBroker
 
 
-# Available brokers
+# Available brokers (real trading)
 BROKERS = {
     "robinhood": RobinhoodBroker,
     "bitvavo": BitvavoBroker,
 }
 
 
-def get_broker(broker_name: str, base_dir: Optional[str] = None) -> BrokerAPI:
+def get_broker(
+    broker_name: str,
+    base_dir: Optional[str] = None,
+    paper_trading: bool = False,
+    paper_balance: float = 10000.0,
+) -> BrokerAPI:
     """
     Factory function to create a broker instance.
 
     Args:
         broker_name: Name of the broker ('robinhood' or 'bitvavo')
         base_dir: Base directory for credential files (default: current dir)
+        paper_trading: If True, wrap broker in paper trading simulator
+        paper_balance: Initial balance for paper trading
 
     Returns:
         Configured broker instance
@@ -44,10 +52,23 @@ def get_broker(broker_name: str, base_dir: Optional[str] = None) -> BrokerAPI:
     if base_dir is None:
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+    # Create the real broker
     if broker_name == "robinhood":
-        return _create_robinhood_broker(base_dir)
+        real_broker = _create_robinhood_broker(base_dir)
     elif broker_name == "bitvavo":
-        return _create_bitvavo_broker(base_dir)
+        real_broker = _create_bitvavo_broker(base_dir)
+
+    # Wrap in paper trading if enabled
+    if paper_trading:
+        state_file = os.path.join(base_dir, "paper_trading_state.json")
+        return PaperBroker(
+            price_source=real_broker,
+            initial_balance=paper_balance,
+            base_currency=real_broker.base_currency,
+            state_file=state_file,
+        )
+
+    return real_broker
 
 
 def _create_robinhood_broker(base_dir: str) -> RobinhoodBroker:
@@ -111,6 +132,7 @@ __all__ = [
     "BrokerAPI",
     "RobinhoodBroker",
     "BitvavoBroker",
+    "PaperBroker",
     "get_broker",
     "BROKERS",
 ]
