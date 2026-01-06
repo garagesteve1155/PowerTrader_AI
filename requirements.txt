@@ -5,3 +5,5 @@ colorama
 cryptography
 PyNaCl
 kucoin-python
+pytest
+responses

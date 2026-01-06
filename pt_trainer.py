@@ -209,7 +209,21 @@ def PrintException():
 	linecache.checkcache(filename)
 	line = linecache.getline(filename, lineno, f.f_globals)
 	print ('EXCEPTION IN (LINE {} "{}"): {}'.format(lineno, line.strip(), exc_obj))
-how_far_to_look_back = 100000
+def _env_int(name: str, default: int) -> int:
+	try:
+		return int(os.environ.get(name, default))
+	except Exception:
+		return default
+
+def _env_flag(name: str, default: bool = False) -> bool:
+	raw = os.environ.get(name, None)
+	if raw is None:
+		return default
+	return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+how_far_to_look_back = _env_int("TRAIN_LOOKBACK", 100000)
+if _env_flag("TRAIN_FAST", False) and "TRAIN_LOOKBACK" not in os.environ:
+	how_far_to_look_back = 20000
 number_of_candles = [2]
 number_of_candles_index = 0
 def restart_program():
@@ -843,18 +857,28 @@ while True:
 					memory_diffs = []
 					if 1 == 1:
 						try:
-							file = open('memories_'+tf_choice+'.txt','r')
-							memory_list = file.read().replace("'","").replace(',','').replace('"','').replace(']','').replace('[','').split('~')
-							file.close()
-							file = open('memory_weights_'+tf_choice+'.txt','r')
-							weight_list = file.read().replace("'","").replace(',','').replace('"','').replace(']','').replace('[','').split(' ')
-							file.close()							
-							file = open('memory_weights_high_'+tf_choice+'.txt','r')
-							high_weight_list = file.read().replace("'","").replace(',','').replace('"','').replace(']','').replace('[','').split(' ')
-							file.close()
-							file = open('memory_weights_low_'+tf_choice+'.txt','r')
-							low_weight_list = file.read().replace("'","").replace(',','').replace('"','').replace(']','').replace('[','').split(' ')
-							file.close()
+							mem_data = load_memory(tf_choice)
+							memory_list = list(mem_data.get('memory_list', []))
+							weight_list = list(mem_data.get('weight_list', []))
+							high_weight_list = list(mem_data.get('high_weight_list', []))
+							low_weight_list = list(mem_data.get('low_weight_list', []))
+							memory_list = [m for m in memory_list if str(m).strip() != '']
+							mem_len = len(memory_list)
+							if not mem_len:
+								pattern_len = len(current_pattern) if 'current_pattern' in locals() else 0
+								zero_pattern = ' '.join(['0'] * pattern_len) if pattern_len else '0'
+								memory_list = [f"{zero_pattern}{{}}0{{}}0"]
+								weight_list = ['1.0']
+								high_weight_list = ['1.0']
+								low_weight_list = ['1.0']
+								mem_len = 1
+							if mem_len:
+								if len(weight_list) < mem_len:
+									weight_list += ['1.0'] * (mem_len - len(weight_list))
+								if len(high_weight_list) < mem_len:
+									high_weight_list += ['1.0'] * (mem_len - len(high_weight_list))
+								if len(low_weight_list) < mem_len:
+									low_weight_list += ['1.0'] * (mem_len - len(low_weight_list))
 							mem_ind = 0
 							diffs_list = []
 							any_perfect = 'no'
@@ -1474,93 +1498,101 @@ while True:
 												except:
 													difference = 100.0
 												try:
-													direction = 'down'
-													try:
-														indy = 0
-														while True:
-															new_memory = 'no'
-															var3 = (moves[indy]*100)
-															high_var3 = (high_moves[indy]*100)
-															low_var3 = (low_moves[indy]*100)
-															if high_perc_diff_now_actual > high_var3+(high_var3*0.1):
-																high_new_weight = high_move_weights[indy] + 0.25
-																if high_new_weight > 2.0:
-																	high_new_weight = 2.0
+														direction = 'down'
+														try:
+															indy = 0
+															while True:
+																new_memory = 'no'
+																if (
+																	indy >= len(moves)
+																	or indy >= len(high_moves)
+																	or indy >= len(low_moves)
+																	or indy >= len(high_move_weights)
+																	or indy >= len(low_move_weights)
+																):
+																	break
+																var3 = (moves[indy]*100)
+																high_var3 = (high_moves[indy]*100)
+																low_var3 = (low_moves[indy]*100)
+																if high_perc_diff_now_actual > high_var3+(high_var3*0.1):
+																	high_new_weight = high_move_weights[indy] + 0.25
+																	if high_new_weight > 2.0:
+																		high_new_weight = 2.0
+																	else:
+																		pass
+																elif high_perc_diff_now_actual < high_var3-(high_var3*0.1):
+																	high_new_weight = high_move_weights[indy] - 0.25
+																	if high_new_weight < 0.0:
+																		high_new_weight = 0.0
+																	else:
+																		pass
 																else:
-																	pass
-															elif high_perc_diff_now_actual < high_var3-(high_var3*0.1):
-																high_new_weight = high_move_weights[indy] - 0.25
-																if high_new_weight < 0.0:
-																	high_new_weight = 0.0
+																	high_new_weight = high_move_weights[indy]
+																if low_perc_diff_now_actual < low_var3-(low_var3*0.1):
+																	low_new_weight = low_move_weights[indy] + 0.25
+																	if low_new_weight > 2.0:
+																		low_new_weight = 2.0
+																	else:
+																		pass
+																elif low_perc_diff_now_actual > low_var3+(low_var3*0.1):
+																	low_new_weight = low_move_weights[indy] - 0.25
+																	if low_new_weight < 0.0:
+																		low_new_weight = 0.0
+																	else:
+																		pass
 																else:
-																	pass
-															else:
-																high_new_weight = high_move_weights[indy]
-															if low_perc_diff_now_actual < low_var3-(low_var3*0.1):
-																low_new_weight = low_move_weights[indy] + 0.25
-																if low_new_weight > 2.0:
-																	low_new_weight = 2.0
+																	low_new_weight = low_move_weights[indy]
+																if perc_diff_now_actual > var3+(var3*0.1):
+																	new_weight = move_weights[indy] + 0.25
+																	if new_weight > 2.0:
+																		new_weight = 2.0
+																	else:
+																		pass
+																elif perc_diff_now_actual < var3-(var3*0.1):
+																	new_weight = move_weights[indy] - 0.25
+																	if new_weight < (0.0-2.0):
+																		new_weight = (0.0-2.0)
+																	else:
+																		pass
 																else:
-																	pass
-															elif low_perc_diff_now_actual > low_var3+(low_var3*0.1):
-																low_new_weight = low_move_weights[indy] - 0.25
-																if low_new_weight < 0.0:
-																	low_new_weight = 0.0
-																else:
-																	pass
-															else:
-																low_new_weight = low_move_weights[indy]
-															if perc_diff_now_actual > var3+(var3*0.1):
-																new_weight = move_weights[indy] + 0.25
-																if new_weight > 2.0:
-																	new_weight = 2.0
-																else:
-																	pass
-															elif perc_diff_now_actual < var3-(var3*0.1):
-																new_weight = move_weights[indy] - 0.25
-																if new_weight < (0.0-2.0):
-																	new_weight = (0.0-2.0)
-																else:
-																	pass
-															else:
-																new_weight = move_weights[indy]
-															del weight_list[perfect_dexs[indy]]
-															weight_list.insert(perfect_dexs[indy],new_weight)
-															del high_weight_list[perfect_dexs[indy]]
-															high_weight_list.insert(perfect_dexs[indy],high_new_weight)
-															del low_weight_list[perfect_dexs[indy]]
-															low_weight_list.insert(perfect_dexs[indy],low_new_weight)
+																	new_weight = move_weights[indy]
+																del weight_list[perfect_dexs[indy]]
+																weight_list.insert(perfect_dexs[indy],new_weight)
+																del high_weight_list[perfect_dexs[indy]]
+																high_weight_list.insert(perfect_dexs[indy],high_new_weight)
+																del low_weight_list[perfect_dexs[indy]]
+																low_weight_list.insert(perfect_dexs[indy],low_new_weight)
 
-															# mark dirty (we will flush in batches)
+																# mark dirty (we will flush in batches)
+																_mem = load_memory(tf_choice)
+																_mem["dirty"] = True
+
+																# occasional batch flush
+																if loop_i % 200 == 0:
+																	flush_memory(tf_choice)
+
+																indy += 1
+																if indy >= len(unweighted):
+																	break
+																else:
+																	pass
+														except:
+															PrintException()
+															all_current_patterns[highlowind].append(this_diff)
+
+															# build the same memory entry format, but store in RAM
+															mem_entry = str(all_current_patterns[highlowind]).replace("'","").replace(',','').replace('"','').replace(']','').replace('[','')+'{}'+str(high_this_diff)+'{}'+str(low_this_diff)
+
 															_mem = load_memory(tf_choice)
+															_mem["memory_list"].append(mem_entry)
+															_mem["weight_list"].append('1.0')
+															_mem["high_weight_list"].append('1.0')
+															_mem["low_weight_list"].append('1.0')
 															_mem["dirty"] = True
 
 															# occasional batch flush
 															if loop_i % 200 == 0:
 																flush_memory(tf_choice)
-
-															indy += 1
-															if indy >= len(unweighted):
-																break
-															else:
-																pass
-													except:
-														PrintException()
-														all_current_patterns[highlowind].append(this_diff)
-
-														# build the same memory entry format, but store in RAM
-														mem_entry = str(all_current_patterns[highlowind]).replace("'","").replace(',','').replace('"','').replace(']','').replace('[','')+'{}'+str(high_this_diff)+'{}'+str(low_this_diff)
-
-														_mem = load_memory(tf_choice)
-														_mem["memory_list"].append(mem_entry)
-														_mem["weight_list"].append('1.0')
-														_mem["high_weight_list"].append('1.0')
-														_mem["low_weight_list"].append('1.0')
-														_mem["dirty"] = True
-
-														# occasional batch flush
-														if loop_i % 200 == 0:
-															flush_memory(tf_choice)
 
 												except:
 													PrintException()

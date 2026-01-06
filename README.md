@@ -1,5 +1,52 @@
 # PowerTrader_AI
 Fully automated crypto trading powered by a custom price prediction AI and a structured/tiered DCA system.
+For Binance Spot setup and migration steps, see EXCHANGE_MIGRATION.md.
+You can place all config in `.env` and just run `python pt_hub.py`.
+Testnet still needs keys; use `BINANCE_PAPER=true` to simulate trades without keys.
+Use `BINANCE_PAPER_TEST=true` to force a full paper trade cycle (entry/hold/dca/exit).
+
+## Run
+- UI: `python pt_hub.py`
+- Tests: `pytest -q`
+
+## Exchange modes (Robinhood + Binance)
+
+PowerTrader can run with Robinhood (legacy) or Binance Spot. Use `.env` to select the provider and mode.
+
+### Minimal `.env` (paper test)
+```env
+EXCHANGE_PROVIDER=binance
+BINANCE_TESTNET=true
+BINANCE_PAPER=true
+BINANCE_PAPER_BALANCE=1000
+BINANCE_PAPER_TEST=true
+BINANCE_PAPER_TEST_COIN=BNB
+BINANCE_PAPER_TEST_ALLOC_USD=50
+BINANCE_PAPER_TEST_DCA_SECONDS=60
+BINANCE_PAPER_TEST_HOLD_SECONDS=120
+```
+
+### Production `.env` (live trading)
+```env
+EXCHANGE_PROVIDER=binance
+BINANCE_TESTNET=false
+BINANCE_PAPER=false
+BINANCE_API_KEY=your_real_key
+BINANCE_API_SECRET=your_real_secret
+```
+
+### Parameter reference
+- `EXCHANGE_PROVIDER`: `robinhood` or `binance`
+- `BINANCE_TESTNET`: use Binance testnet endpoints (still requires testnet keys)
+- `BINANCE_PAPER`: simulate trades with fake balance (no keys required)
+- `BINANCE_PAPER_BALANCE`: starting paper balance (default 1000)
+- `BINANCE_PAPER_TEST`: force a full paper trade cycle (entry/hold/dca/exit)
+- `BINANCE_PAPER_TEST_COIN`: coin used for paper test cycle (ex: `BNB`)
+- `BINANCE_PAPER_TEST_ALLOC_USD`: order size for paper test entries
+- `BINANCE_PAPER_TEST_DCA_SECONDS`: seconds before a test DCA buy
+- `BINANCE_PAPER_TEST_HOLD_SECONDS`: seconds before a test exit
+- `BINANCE_API_KEY`, `BINANCE_API_SECRET`: required for live/testnet real orders
+
 
 This is my personal trading bot that I decided to make open source. I made this strategy to match my personal goals. This system is meant to be a foundation/framework for you to build your dream bot!
 
@@ -125,6 +172,7 @@ PowerTrader AI uses a simple folder style:
 ## Step 6 — Train (inside the Hub)
 
 Training builds the system’s coin “memory” so it can generate signals.
+Optional: set `TRAIN_FAST=true` or `TRAIN_LOOKBACK=20000` (The number will depend on the duration of the training; configure a slow to fast training, but comprehension will be worse (use TRAIN_LOOKBACK only in paper mode)) in `.env` to speed up training.
 
 1. In the Hub, click **Train All**.
 2. Wait until training finishes.
