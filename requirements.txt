@@ -5,3 +5,4 @@ colorama
 cryptography
 PyNaCl
 kucoin-python
+python-bitvavo-api

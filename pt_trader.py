@@ -14,6 +14,9 @@ import traceback
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import serialization
 
+# Broker abstraction
+from brokers import get_broker, BrokerAPI
+
 # -----------------------------
 # GUI HUB OUTPUTS
 # -----------------------------
@@ -42,6 +45,9 @@ _gui_settings_cache = {
 	"mtime": None,
 	"coins": ['BTC', 'ETH', 'XRP', 'BNB', 'DOGE'],  # fallback defaults
 	"main_neural_dir": None,
+	"broker": "robinhood",  # 'robinhood' or 'bitvavo'
+	"paper_trading": False,
+	"paper_balance": 10000.0,
 }
 
 def _load_gui_settings() -> dict:
@@ -75,14 +81,32 @@ def _load_gui_settings() -> dict:
 		else:
 			main_neural_dir = None
 
+		# Load broker setting
+		broker = data.get("broker", "robinhood")
+		if broker not in ("robinhood", "bitvavo"):
+			broker = "robinhood"
+
+		# Load paper trading settings
+		paper_trading = bool(data.get("paper_trading", False))
+		try:
+			paper_balance = float(data.get("paper_balance", 10000.0))
+		except (ValueError, TypeError):
+			paper_balance = 10000.0
+
 		_gui_settings_cache["mtime"] = mtime
 		_gui_settings_cache["coins"] = coins
 		_gui_settings_cache["main_neural_dir"] = main_neural_dir
+		_gui_settings_cache["broker"] = broker
+		_gui_settings_cache["paper_trading"] = paper_trading
+		_gui_settings_cache["paper_balance"] = paper_balance
 
 		return {
 			"mtime": mtime,
 			"coins": list(coins),
 			"main_neural_dir": main_neural_dir,
+			"broker": broker,
+			"paper_trading": paper_trading,
+			"paper_balance": paper_balance,
 		}
 	except Exception:
 		return dict(_gui_settings_cache)
@@ -151,37 +175,52 @@ def _refresh_paths_and_symbols():
 	base_paths = _build_base_paths(main_dir, crypto_symbols)
 
 
-#API STUFF
-API_KEY = ""
-BASE64_PRIVATE_KEY = ""
-
-try:
-    with open('r_key.txt', 'r', encoding='utf-8') as f:
-        API_KEY = (f.read() or "").strip()
-    with open('r_secret.txt', 'r', encoding='utf-8') as f:
-        BASE64_PRIVATE_KEY = (f.read() or "").strip()
-except Exception:
-    API_KEY = ""
-    BASE64_PRIVATE_KEY = ""
-
-if not API_KEY or not BASE64_PRIVATE_KEY:
-    print(
-        "\n[PowerTrader] Robinhood API credentials not found.\n"
-        "Open the GUI and go to Settings → Robinhood API → Setup / Update.\n"
-        "That wizard will generate your keypair, tell you where to paste the public key on Robinhood,\n"
-        "and will save r_key.txt + r_secret.txt so this trader can authenticate.\n"
+# Load broker based on settings
+def _get_configured_broker() -> BrokerAPI:
+    """Load and return the configured broker instance."""
+    settings = _load_gui_settings()
+    broker_name = settings.get("broker", "robinhood")
+    paper_trading = settings.get("paper_trading", False)
+    paper_balance = settings.get("paper_balance", 10000.0)
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    return get_broker(
+        broker_name,
+        base_dir,
+        paper_trading=paper_trading,
+        paper_balance=paper_balance,
     )
-    raise SystemExit(1)
+
+# Initialize broker (will be reloaded if settings change)
+_current_broker: Optional[BrokerAPI] = None
+_current_broker_name: Optional[str] = None
+_current_paper_trading: Optional[bool] = None
 
 class CryptoAPITrading:
     def __init__(self):
+        global _current_broker, _current_broker_name, _current_paper_trading
+
         # keep a copy of the folder map (same idea as trader.py)
         self.path_map = dict(base_paths)
 
-        self.api_key = API_KEY
-        private_key_seed = base64.b64decode(BASE64_PRIVATE_KEY)
-        self.private_key = SigningKey(private_key_seed)
-        self.base_url = "https://trading.robinhood.com"
+        # Load broker from settings
+        settings = _load_gui_settings()
+        broker_name = settings.get("broker", "robinhood")
+        paper_trading = settings.get("paper_trading", False)
+
+        # Initialize or reuse broker (reload if broker or paper mode changed)
+        if (_current_broker is None or
+            _current_broker_name != broker_name or
+            _current_paper_trading != paper_trading):
+            _current_broker = _get_configured_broker()
+            _current_broker_name = broker_name
+            _current_paper_trading = paper_trading
+            if paper_trading:
+                print(f"\n[PowerTrader] 📝 PAPER TRADING MODE - No real trades will be executed")
+                print(f"[PowerTrader] Starting balance: {settings.get('paper_balance', 10000.0):.2f} {_current_broker.base_currency}\n")
+
+        self.broker = _current_broker
+        self.broker_name = broker_name
+        self.paper_trading = paper_trading
 
         self.dca_levels_triggered = {}  # Track DCA levels for each crypto
         self.dca_levels = [-2.5, -5.0, -10.0, -20.0, -30.0, -40.0, -50.0]  # Moved to instance variable
@@ -449,7 +488,7 @@ class CryptoAPITrading:
         for holding in holdings.get("results", []):
             symbol = holding["asset_code"]
 
-            full_symbol = f"{symbol}-USD"
+            full_symbol = self.broker.format_symbol(symbol)
             orders = self.get_orders(full_symbol)
             
             if not orders or "results" not in orders:
@@ -618,66 +657,23 @@ class CryptoAPITrading:
         self._dca_buy_ts[base] = []
 
 
-    def make_api_request(self, method: str, path: str, body: Optional[str] = "") -> Any:
-
-        timestamp = self._get_current_timestamp()
-        headers = self.get_authorization_header(method, path, body, timestamp)
-        url = self.base_url + path
-
-        try:
-            if method == "GET":
-                response = requests.get(url, headers=headers, timeout=10)
-            elif method == "POST":
-                response = requests.post(url, headers=headers, json=json.loads(body), timeout=10)
-
-            response.raise_for_status()
-            return response.json()
-        except requests.HTTPError as http_err:
-            try:
-                # Parse and return the JSON error response
-                error_response = response.json()
-                return error_response  # Return the JSON error for further handling
-            except Exception:
-                return None
-        except Exception:
-            return None
-
-    def get_authorization_header(
-            self, method: str, path: str, body: str, timestamp: int
-    ) -> Dict[str, str]:
-        message_to_sign = f"{self.api_key}{timestamp}{path}{method}{body}"
-        signed = self.private_key.sign(message_to_sign.encode("utf-8"))
-
-        return {
-            "x-api-key": self.api_key,
-            "x-signature": base64.b64encode(signed.signature).decode("utf-8"),
-            "x-timestamp": str(timestamp),
-        }
+    # --- Broker API delegation methods ---
 
     def get_account(self) -> Any:
-        path = "/api/v1/crypto/trading/accounts/"
-        return self.make_api_request("GET", path)
+        """Get account info via broker."""
+        return self.broker.get_account()
 
     def get_holdings(self) -> Any:
-        path = "/api/v1/crypto/trading/holdings/"
-        return self.make_api_request("GET", path)
+        """Get holdings via broker."""
+        return self.broker.get_holdings()
 
     def get_trading_pairs(self) -> Any:
-        path = "/api/v1/crypto/trading/trading_pairs/"
-        response = self.make_api_request("GET", path)
-
-        if not response or "results" not in response:
-            return []
-
-        trading_pairs = response.get("results", [])
-        if not trading_pairs:
-            return []
-
-        return trading_pairs
+        """Get trading pairs via broker."""
+        return self.broker.get_trading_pairs()
 
     def get_orders(self, symbol: str) -> Any:
-        path = f"/api/v1/crypto/trading/orders/?symbol={symbol}"
-        return self.make_api_request("GET", path)
+        """Get orders via broker."""
+        return self.broker.get_orders(symbol)
 
     def calculate_cost_basis(self):
         holdings = self.get_holdings()
@@ -693,7 +689,9 @@ class CryptoAPITrading:
         cost_basis = {}
 
         for asset_code in active_assets:
-            orders = self.get_orders(f"{asset_code}-USD")
+            # Use broker's symbol format (USD vs EUR)
+            symbol = self.broker.format_symbol(asset_code)
+            orders = self.get_orders(symbol)
             if not orders or "results" not in orders:
                 continue
 
@@ -734,48 +732,8 @@ class CryptoAPITrading:
         return cost_basis
 
     def get_price(self, symbols: list) -> Dict[str, float]:
-        buy_prices = {}
-        sell_prices = {}
-        valid_symbols = []
-
-        for symbol in symbols:
-            if symbol == "USDC-USD":
-                continue
-
-            path = f"/api/v1/crypto/marketdata/best_bid_ask/?symbol={symbol}"
-            response = self.make_api_request("GET", path)
-
-            if response and "results" in response:
-                result = response["results"][0]
-                ask = float(result["ask_inclusive_of_buy_spread"])
-                bid = float(result["bid_inclusive_of_sell_spread"])
-
-                buy_prices[symbol] = ask
-                sell_prices[symbol] = bid
-                valid_symbols.append(symbol)
-
-                # Update cache for transient failures later
-                try:
-                    self._last_good_bid_ask[symbol] = {"ask": ask, "bid": bid, "ts": time.time()}
-                except Exception:
-                    pass
-            else:
-                # Fallback to cached bid/ask so account value never drops due to a transient miss
-                cached = None
-                try:
-                    cached = self._last_good_bid_ask.get(symbol)
-                except Exception:
-                    cached = None
-
-                if cached:
-                    ask = float(cached.get("ask", 0.0) or 0.0)
-                    bid = float(cached.get("bid", 0.0) or 0.0)
-                    if ask > 0.0 and bid > 0.0:
-                        buy_prices[symbol] = ask
-                        sell_prices[symbol] = bid
-                        valid_symbols.append(symbol)
-
-        return buy_prices, sell_prices, valid_symbols
+        """Get prices via broker."""
+        return self.broker.get_price(symbols)
 
 
     def place_buy_order(
@@ -789,69 +747,37 @@ class CryptoAPITrading:
         pnl_pct: Optional[float] = None,
         tag: Optional[str] = None,
     ) -> Any:
-        # Fetch the current price of the asset
-        current_buy_prices, current_sell_prices, valid_symbols = self.get_price([symbol])
-        current_price = current_buy_prices[symbol]
-        asset_quantity = amount_in_usd / current_price
+        """Place buy order via broker."""
+        # Get current price for recording
+        current_buy_prices, _, _ = self.get_price([symbol])
+        current_price = current_buy_prices.get(symbol, 0)
 
-        max_retries = 5
-        retries = 0
+        # Place order via broker
+        response = self.broker.place_buy_order(
+            client_order_id=client_order_id,
+            side=side,
+            order_type=order_type,
+            symbol=symbol,
+            amount_in_base_currency=amount_in_usd,
+        )
 
-        while retries < max_retries:
-            retries += 1
-            try:
-                # Default precision to 8 decimals initially
-                rounded_quantity = round(asset_quantity, 8)
+        if response:
+            # Calculate quantity for recording
+            asset_quantity = amount_in_usd / current_price if current_price > 0 else 0
+            order_id = response.get("id", None) if isinstance(response, dict) else None
 
-                body = {
-                    "client_order_id": client_order_id,
-                    "side": side,
-                    "type": order_type,
-                    "symbol": symbol,
-                    "market_order_config": {
-                        "asset_quantity": f"{rounded_quantity:.8f}"  # Start with 8 decimal places
-                    }
-                }
+            self._record_trade(
+                side="buy",
+                symbol=symbol,
+                qty=float(asset_quantity),
+                price=float(current_price) if current_price > 0 else None,
+                avg_cost_basis=float(avg_cost_basis) if avg_cost_basis is not None else None,
+                pnl_pct=float(pnl_pct) if pnl_pct is not None else None,
+                tag=tag,
+                order_id=order_id,
+            )
 
-                path = "/api/v1/crypto/trading/orders/"
-                response = self.make_api_request("POST", path, json.dumps(body))
-                if response and "errors" not in response:
-                    # Record for GUI history (estimated fill at current_price)
-                    try:
-                        order_id = response.get("id", None) if isinstance(response, dict) else None
-                    except Exception:
-                        order_id = None
-                    self._record_trade(
-                        side="buy",
-                        symbol=symbol,
-                        qty=float(rounded_quantity),
-                        price=float(current_price),
-                        avg_cost_basis=float(avg_cost_basis) if avg_cost_basis is not None else None,
-                        pnl_pct=float(pnl_pct) if pnl_pct is not None else None,
-                        tag=tag,
-                        order_id=order_id,
-                    )
-                    return response  # Successfully placed order
-
-            except Exception as e:
-                pass #print(traceback.format_exc())
-                
-
-            # Check for precision errors
-            if response and "errors" in response:
-                for error in response["errors"]:
-                    if "has too much precision" in error.get("detail", ""):
-                        # Extract required precision directly from the error message
-                        detail = error["detail"]
-                        nearest_value = detail.split("nearest ")[1].split(" ")[0]
-
-                        decimal_places = len(nearest_value.split(".")[1].rstrip("0"))
-                        asset_quantity = round(asset_quantity, decimal_places)
-                        break
-                    elif "must be greater than or equal to" in error.get("detail", ""):
-                        return None
-
-        return None
+        return response
 
 
     def place_sell_order(
@@ -866,21 +792,16 @@ class CryptoAPITrading:
         pnl_pct: Optional[float] = None,
         tag: Optional[str] = None,
     ) -> Any:
-        body = {
-            "client_order_id": client_order_id,
-            "side": side,
-            "type": order_type,
-            "symbol": symbol,
-            "market_order_config": {
-                "asset_quantity": f"{asset_quantity:.8f}"
-            }
-        }
+        """Place sell order via broker."""
+        response = self.broker.place_sell_order(
+            client_order_id=client_order_id,
+            side=side,
+            order_type=order_type,
+            symbol=symbol,
+            asset_quantity=asset_quantity,
+        )
 
-        path = "/api/v1/crypto/trading/orders/"
-   
-        response = self.make_api_request("POST", path, json.dumps(body))
-
-        if response and isinstance(response, dict) and "errors" not in response:
+        if response and isinstance(response, dict):
             order_id = response.get("id", None)
             self._record_trade(
                 side="sell",
@@ -916,12 +837,12 @@ class CryptoAPITrading:
 
         # Use the stored cost_basis instead of recalculating
         cost_basis = self.cost_basis
-        # Fetch current prices
-        symbols = [holding["asset_code"] + "-USD" for holding in holdings.get("results", [])]
+        # Fetch current prices using broker's symbol format
+        symbols = [self.broker.format_symbol(holding["asset_code"]) for holding in holdings.get("results", [])]
 
         # ALSO fetch prices for tracked coins even if not currently held (so GUI can show bid/ask lines)
         for s in crypto_symbols:
-            full = f"{s}-USD"
+            full = self.broker.format_symbol(s)
             if full not in symbols:
                 symbols.append(full)
 
@@ -960,7 +881,7 @@ class CryptoAPITrading:
                 if qty <= 0.0:
                     continue
 
-                sym = f"{asset}-USD"
+                sym = self.broker.format_symbol(asset)
                 bp = float(current_buy_prices.get(sym, 0.0) or 0.0)
                 sp = float(current_sell_prices.get(sym, 0.0) or 0.0)
 
@@ -1011,7 +932,7 @@ class CryptoAPITrading:
         positions = {}
         for holding in holdings.get("results", []):
             symbol = holding["asset_code"]
-            full_symbol = f"{symbol}-USD"
+            full_symbol = self.broker.format_symbol(symbol)
 
             if full_symbol not in valid_symbols or symbol == "USDC":
                 continue
@@ -1336,7 +1257,7 @@ class CryptoAPITrading:
                 if sym in positions:
                     continue
 
-                full_symbol = f"{sym}-USD"
+                full_symbol = self.broker.format_symbol(sym)
                 if full_symbol not in valid_symbols or sym == "USDC":
                     continue
 
@@ -1381,12 +1302,12 @@ class CryptoAPITrading:
         if allocation_in_usd < 0.5:
             allocation_in_usd = 0.5
 
-        holding_full_symbols = [f"{h['asset_code']}-USD" for h in holdings.get("results", [])]
+        holding_full_symbols = [self.broker.format_symbol(h['asset_code']) for h in holdings.get("results", [])]
 
         start_index = 0
         while start_index < len(crypto_symbols):
             base_symbol = crypto_symbols[start_index].upper().strip()
-            full_symbol = f"{base_symbol}-USD"
+            full_symbol = self.broker.format_symbol(base_symbol)
 
             # Skip if already held
             if full_symbol in holding_full_symbols:
@@ -1431,7 +1352,7 @@ class CryptoAPITrading:
                 )
                 time.sleep(5)
                 holdings = self.get_holdings()
-                holding_full_symbols = [f"{h['asset_code']}-USD" for h in holdings.get("results", [])]
+                holding_full_symbols = [self.broker.format_symbol(h['asset_code']) for h in holdings.get("results", [])]
 
 
             start_index += 1
