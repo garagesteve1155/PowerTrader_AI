@@ -38,7 +38,11 @@ I am not selling anything. This trading bot is not a product. This system is for
 
 ## 🔐 API Credentials Setup (Both Versions)
 
-Both versions now use a single unified credentials file: **`rh00d.sct`**
+Both versions use independent credentials files: **`rh00d.sct`** in each directory
+
+### File Locations
+- **C Version**: `c_version/rh00d.sct`  
+- **Python Version**: `python_version/rh00d.sct`
 
 ### Format
 ```json
@@ -48,25 +52,34 @@ Both versions now use a single unified credentials file: **`rh00d.sct`**
 }
 ```
 
-### Quick Setup
+### Per-Version Setup
+
+**C Version:**
 ```bash
-# 1. Create rh00d.sct with credentials from Robinhood
+cd c_version
 cat > rh00d.sct << 'EOF'
 {
   "api_key": "rh.YOUR_API_KEY",
   "private_key": "YOUR_BASE64_PRIVATE_KEY"
 }
 EOF
-
-# 2. Set restrictive permissions
 chmod 600 rh00d.sct
+```
 
-# 3. Add to .gitignore
-echo "rh00d.sct" >> .gitignore
+**Python Version:**
+```bash
+cd python_version
+cat > rh00d.sct << 'EOF'
+{
+  "api_key": "rh.YOUR_API_KEY",
+  "private_key": "YOUR_BASE64_PRIVATE_KEY"
+}
+EOF
+chmod 600 rh00d.sct
 ```
 
 ### Security Checklist
-- [ ] Created `rh00d.sct` with API credentials
+- [ ] Created `rh00d.sct` in version directory
 - [ ] Set `chmod 600 rh00d.sct`
 - [ ] Added `rh00d.sct` to `.gitignore`
 - [ ] Never commit credentials to git

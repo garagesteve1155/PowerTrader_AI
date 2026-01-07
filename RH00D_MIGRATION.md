@@ -24,7 +24,9 @@ Successfully migrated PowerTrader AI credentials management to a unified, secure
 ## New Credentials File Format
 
 **File**: `rh00d.sct`  
-**Location**: Project root directory  
+**Location**: Per-version directory (independent)
+- **C Version**: `c_version/rh00d.sct`  
+- **Python Version**: `python_version/rh00d.sct`  
 **Permissions**: `0600` (rw-------)  
 **Format**: JSON
 
@@ -34,6 +36,8 @@ Successfully migrated PowerTrader AI credentials management to a unified, secure
   "private_key": "base64_encoded_ed25519_seed"
 }
 ```
+
+Each version maintains its own credentials file, allowing them to run as fully standalone programs.
 
 ## Files Modified
 
