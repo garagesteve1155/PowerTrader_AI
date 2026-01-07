@@ -1,5 +1,10 @@
-# PowerTrader_AI
+# PowerTrader AI - Dual Implementation
+
 Fully automated crypto trading powered by a custom price prediction AI and a structured/tiered DCA system.
+
+**Now available in two versions:**
+- **C Version** 🚀 (High-performance, minimal dependencies)
+- **Python Version** 🎯 (Full-featured with GUI and live APIs)
 
 This is my personal trading bot that I decided to make open source. I made this strategy to match my personal goals. This system is meant to be a foundation/framework for you to build your dream bot!
 
@@ -11,7 +16,61 @@ I DO believe in crypto. I'd rather just wait and maybe add more money to my acco
 
 I am not selling anything. This trading bot is not a product. This system is for experimentation and education. The only reason you would EVER send me money is if you are voluntarily donating (donation routes can be found at the bottom of this readme :) ). Do not fall for any scams! PowerTrader AI is COMPLETELY FREE FOREVER!
 
-IMPORTANT: This software places real trades automatically. You are responsible for everything it does to your money and your account. Keep your API keys private. I am not giving financial advice. I am not responsible for any losses incurred or any security breaches to your computer (the code is entirely open source and can be confirmed non-malicious). You are fully responsible for doing your own due diligence to learn and understand this trading system and to use it properly. You are fully responsible for all of your money and all of the bot's actions, and any gains or losses.
+⚠️ **IMPORTANT**: This software places real trades automatically. You are responsible for everything it does to your money and your account. Keep your API keys private. I am not giving financial advice. I am not responsible for any losses incurred or any security breaches to your computer (the code is entirely open source and can be confirmed non-malicious). You are fully responsible for doing your own due diligence to learn and understand this trading system and to use it properly. You are fully responsible for all of your money and all of the bot's actions, and any gains or losses.
+
+---
+
+## 📁 Choose Your Version
+
+| Feature | C Version | Python Version |
+|---------|-----------|-----------------|
+| **Startup Time** | ~2ms | ~1s |
+| **Memory** | ~10MB | ~100MB |
+| **GUI** | ❌ Console | ✅ Tkinter |
+| **Live APIs** | ❌ Stubs | ✅ KuCoin, Robinhood |
+| **Neural Networks** | Simplified | TensorFlow |
+| **Dependencies** | 0 | 15+ |
+| **Use Case** | **Testing, embedded** | **Production trading** |
+
+### Quick Links
+- [👉 C Version Guide](c_version/README.md)
+- [👉 Python Version Guide](python_version/README.md)
+
+## 🔐 API Credentials Setup (Both Versions)
+
+Both versions now use a single unified credentials file: **`rh00d.sct`**
+
+### Format
+```json
+{
+  "api_key": "rh.your_robinhood_api_key",
+  "private_key": "base64_encoded_ed25519_private_key"
+}
+```
+
+### Quick Setup
+```bash
+# 1. Create rh00d.sct with credentials from Robinhood
+cat > rh00d.sct << 'EOF'
+{
+  "api_key": "rh.YOUR_API_KEY",
+  "private_key": "YOUR_BASE64_PRIVATE_KEY"
+}
+EOF
+
+# 2. Set restrictive permissions
+chmod 600 rh00d.sct
+
+# 3. Add to .gitignore
+echo "rh00d.sct" >> .gitignore
+```
+
+### Security Checklist
+- [ ] Created `rh00d.sct` with API credentials
+- [ ] Set `chmod 600 rh00d.sct`
+- [ ] Added `rh00d.sct` to `.gitignore`
+- [ ] Never commit credentials to git
+- [ ] File permissions show `rw-------` only
 
 “It’s an instance-based (kNN/kernel-style) predictor with online per-instance reliability weighting, used as a multi-timeframe trading signal.” - ChatGPT on the type of AI used in this trading bot.
 

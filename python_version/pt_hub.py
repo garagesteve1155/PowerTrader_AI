@@ -4366,44 +4366,43 @@ class PowerTraderHub(tk.Tk):
         add_row(r, "pt_trader.py path:", trader_script_var); r += 1
 
         # --- Robinhood API setup (writes r_key.txt + r_secret.txt used by pt_trader.py) ---
-        def _api_paths() -> Tuple[str, str]:
-            key_path = os.path.join(self.project_dir, "r_key.txt")
-            secret_path = os.path.join(self.project_dir, "r_secret.txt")
-            return key_path, secret_path
+        def _api_paths() -> str:
+            """Return path to rh00d.sct (single credentials file)."""
+            return os.path.join(self.project_dir, "rh00d.sct")
 
         def _read_api_files() -> Tuple[str, str]:
-            key_path, secret_path = _api_paths()
+            """Read API key and secret from rh00d.sct file."""
+            sct_path = _api_paths()
             try:
-                with open(key_path, "r", encoding="utf-8") as f:
-                    k = (f.read() or "").strip()
+                if os.path.isfile(sct_path):
+                    with open(sct_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        k = (data.get("api_key") or "").strip()
+                        s = (data.get("private_key") or "").strip()
+                        return k, s
             except Exception:
-                k = ""
-            try:
-                with open(secret_path, "r", encoding="utf-8") as f:
-                    s = (f.read() or "").strip()
-            except Exception:
-                s = ""
-            return k, s
+                pass
+            return "", ""
 
         api_status_var = tk.StringVar(value="")
 
         def _refresh_api_status() -> None:
-            key_path, secret_path = _api_paths()
+            sct_path = _api_paths()
             k, s = _read_api_files()
 
             missing = []
             if not k:
-                missing.append("r_key.txt (API Key)")
+                missing.append("API Key")
             if not s:
-                missing.append("r_secret.txt (PRIVATE key)")
+                missing.append("PRIVATE key")
 
             if missing:
-                api_status_var.set("Not configured ❌ (missing " + ", ".join(missing) + ")")
+                api_status_var.set("Not configured ❌ (missing " + ", ".join(missing) + " in rh00d.sct)")
             else:
-                api_status_var.set("Configured ✅ (credentials found)")
+                api_status_var.set("Configured ✅ (credentials found in rh00d.sct)")
 
         def _open_api_folder() -> None:
-            """Open the folder where r_key.txt / r_secret.txt live."""
+            """Open the folder where rh00d.sct lives."""
             try:
                 folder = os.path.abspath(self.project_dir)
                 if os.name == "nt":
@@ -4417,29 +4416,26 @@ class PowerTraderHub(tk.Tk):
                 messagebox.showerror("Couldn't open folder", f"Tried to open:\n{self.project_dir}\n\nError:\n{e}")
 
         def _clear_api_files() -> None:
-            """Delete r_key.txt / r_secret.txt (with a big confirmation)."""
-            key_path, secret_path = _api_paths()
+            """Delete rh00d.sct (with a big confirmation)."""
+            sct_path = _api_paths()
             if not messagebox.askyesno(
                 "Delete API credentials?",
                 "This will delete:\n"
-                f"  {key_path}\n"
-                f"  {secret_path}\n\n"
+                f"  {sct_path}\n\n"
                 "After deleting, the trader can NOT authenticate until you run the setup wizard again.\n\n"
-                "Are you sure you want to delete these files?"
+                "Are you sure you want to delete this file?"
             ):
                 return
 
             try:
-                if os.path.isfile(key_path):
-                    os.remove(key_path)
-                if os.path.isfile(secret_path):
-                    os.remove(secret_path)
+                if os.path.isfile(sct_path):
+                    os.remove(sct_path)
             except Exception as e:
-                messagebox.showerror("Delete failed", f"Couldn't delete the files:\n\n{e}")
+                messagebox.showerror("Delete failed", f"Couldn't delete the file:\n\n{e}")
                 return
 
             _refresh_api_status()
-            messagebox.showinfo("Deleted", "Deleted r_key.txt and r_secret.txt.")
+            messagebox.showinfo("Deleted", "Deleted rh00d.sct.")
 
         def _open_robinhood_api_wizard() -> None:
             """
@@ -4555,7 +4551,7 @@ class PowerTraderHub(tk.Tk):
             wiz_canvas.bind("<Button-5>", lambda _e: wiz_canvas.yview_scroll(3, "units"), add="+")   # Linux
 
 
-            key_path, secret_path = _api_paths()
+            sct_path = _api_paths()
 
             # Load any existing credentials so users can update without re-generating keys.
             existing_api_key, existing_private_b64 = _read_api_files()
@@ -4612,9 +4608,8 @@ class PowerTraderHub(tk.Tk):
                 "  G) Permissions: this TRADER needs READ + TRADE. (READ-only cannot place orders.)\n"
                 "  H) Click Save. Robinhood shows your API Key — copy it right away (it may only show once).\n\n"
                 "📱 Mobile note: if you can't find API Trading in the app, use robinhood.com in a browser.\n\n"
-                "This wizard will save two files in the same folder as pt_hub.py:\n"
-                "  - r_key.txt    (your API Key)\n"
-                "  - r_secret.txt (your PRIVATE key in base64)  ← keep this secret like a password\n"
+                "This wizard will save one file in the same folder as pt_hub.py:\n"
+                "  - rh00d.sct  (JSON file containing your API Key and PRIVATE key in base64)  ← keep this secret like a password\n"
             )
 
             intro_lbl = ttk.Label(container, text=intro, justify="left")
@@ -4630,7 +4625,7 @@ class PowerTraderHub(tk.Tk):
 
             ttk.Button(top_btns, text="Open Robinhood API Credentials page (Crypto)", command=open_robinhood_page).pack(side="left")
             ttk.Button(top_btns, text="Open Robinhood Crypto Trading API docs", command=lambda: webbrowser.open("https://docs.robinhood.com/crypto/trading/")).pack(side="left", padx=8)
-            ttk.Button(top_btns, text="Open Folder With r_key.txt / r_secret.txt", command=lambda: _open_in_file_manager(self.project_dir)).pack(side="left", padx=8)
+            ttk.Button(top_btns, text="Open Folder With rh00d.sct", command=lambda: _open_in_file_manager(self.project_dir)).pack(side="left", padx=8)
 
             # -----------------------------
             # Step 1 — Generate keys
@@ -4791,7 +4786,7 @@ class PowerTraderHub(tk.Tk):
                     pk = ed25519.Ed25519PrivateKey.from_private_bytes(seed)
                     sig_b64 = base64.b64encode(pk.sign(msg)).decode("utf-8")
                 except Exception as e:
-                    messagebox.showerror("Bad private key", f"Couldn't use your private key (r_secret.txt).\n\nError:\n{e}")
+                    messagebox.showerror("Bad private key", f"Couldn't use your private key (rh00d.sct).\n\nError:\n{e}")
                     return
 
 
@@ -4850,7 +4845,7 @@ class PowerTraderHub(tk.Tk):
             ack_var = tk.BooleanVar(value=False)
             ack = ttk.Checkbutton(
                 step3,
-                text="I understand r_secret.txt is PRIVATE and I will not share it.",
+                text="I understand rh00d.sct is PRIVATE and I will not share it.",
                 variable=ack_var,
             )
             ack.grid(row=0, column=0, sticky="w", padx=10, pady=(10, 6))
@@ -4895,7 +4890,7 @@ class PowerTraderHub(tk.Tk):
                 if not bool(ack_var.get()):
                     messagebox.showwarning(
                         "Please confirm",
-                        "For safety, please check the box confirming you understand r_secret.txt is private."
+                        "For safety, please check the box confirming you understand rh00d.sct is private."
                     )
                     return
 
@@ -4911,29 +4906,31 @@ class PowerTraderHub(tk.Tk):
                 # Back up existing files (so user can undo mistakes)
                 try:
                     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    if os.path.isfile(key_path):
-                        shutil.copy2(key_path, f"{key_path}.bak_{ts}")
-                    if os.path.isfile(secret_path):
-                        shutil.copy2(secret_path, f"{secret_path}.bak_{ts}")
+                    if os.path.isfile(sct_path):
+                        shutil.copy2(sct_path, f"{sct_path}.bak_{ts}")
                 except Exception:
                     pass
 
                 try:
-                    with open(key_path, "w", encoding="utf-8") as f:
-                        f.write(api_key)
-                    with open(secret_path, "w", encoding="utf-8") as f:
-                        f.write(priv_b64)
+                    # Write single JSON file with both credentials
+                    data = {
+                        "api_key": api_key,
+                        "private_key": priv_b64
+                    }
+                    with open(sct_path, "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=2)
+                    # Set restrictive permissions: rw------- (owner read/write only)
+                    os.chmod(sct_path, 0o600)
                 except Exception as e:
-                    messagebox.showerror("Save failed", f"Couldn't write the credential files.\n\nError:\n{e}")
+                    messagebox.showerror("Save failed", f"Couldn't write the credential file.\n\nError:\n{e}")
                     return
 
                 _refresh_api_status()
                 messagebox.showinfo(
                     "Saved",
                     "✅ Saved!\n\n"
-                    "The trader will automatically read these files next time it starts:\n"
-                    f"  API Key → {_mask_path(key_path)}\n"
-                    f"  Private Key → {_mask_path(secret_path)}\n\n"
+                    "The trader will automatically read this file next time it starts:\n"
+                    f"  {_mask_path(sct_path)}\n\n"
                     "Next steps:\n"
                     "  1) Close this window\n"
                     "  2) Start the trader (pt_trader.py)\n"
