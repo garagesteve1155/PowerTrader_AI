@@ -36,6 +36,14 @@ jobs:
         run: |
           build_windows.bat
 
+      - name: Install Inno Setup
+        run: |
+          choco install innosetup -y
+
+      - name: Create Windows installer
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer_windows.iss
+
       - name: Create distribution archive
         run: |
           cd dist
@@ -45,7 +53,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: PowerTrader_AI-Windows-x64
-          path: PowerTrader_AI-Windows-x64.zip
+          path: |
+            PowerTrader_AI-Windows-x64.zip
+            Output/PowerTrader_AI_Setup.exe
           retention-days: 30
 
   build-macos-intel:
@@ -73,17 +83,31 @@ jobs:
           chmod +x build_mac.sh
           ./build_mac.sh
 
+      - name: Install create-dmg
+        run: |
+          brew install create-dmg
+
+      - name: Create DMG installer
+        run: |
+          chmod +x create_dmg_installer.sh
+          ./create_dmg_installer.sh
+
+      - name: Rename DMG for Intel
+        run: |
+          mv dist/PowerTrader_AI.dmg dist/PowerTrader_AI-Intel.dmg
+
       - name: Create distribution archive
         run: |
           cd dist
-          # Create DMG or ZIP
           zip -r ../PowerTrader_AI-macOS-Intel.zip PowerTrader_AI.app pt_thinker pt_trader
 
       - name: Upload macOS Intel artifacts
         uses: actions/upload-artifact@v4
         with:
           name: PowerTrader_AI-macOS-Intel
-          path: PowerTrader_AI-macOS-Intel.zip
+          path: |
+            PowerTrader_AI-macOS-Intel.zip
+            dist/PowerTrader_AI-Intel.dmg
           retention-days: 30
 
   build-macos-arm:
@@ -111,6 +135,19 @@ jobs:
           chmod +x build_mac.sh
           ./build_mac.sh
 
+      - name: Install create-dmg
+        run: |
+          brew install create-dmg
+
+      - name: Create DMG installer
+        run: |
+          chmod +x create_dmg_installer.sh
+          ./create_dmg_installer.sh
+
+      - name: Rename DMG for ARM
+        run: |
+          mv dist/PowerTrader_AI.dmg dist/PowerTrader_AI-ARM64.dmg
+
       - name: Create distribution archive
         run: |
           cd dist
@@ -120,7 +157,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: PowerTrader_AI-macOS-ARM64
-          path: PowerTrader_AI-macOS-ARM64.zip
+          path: |
+            PowerTrader_AI-macOS-ARM64.zip
+            dist/PowerTrader_AI-ARM64.dmg
           retention-days: 30
 
   create-release:
@@ -149,8 +188,11 @@ jobs:
         with:
           files: |
             artifacts/PowerTrader_AI-Windows-x64/PowerTrader_AI-Windows-x64.zip
+            artifacts/PowerTrader_AI-Windows-x64/Output/PowerTrader_AI_Setup.exe
             artifacts/PowerTrader_AI-macOS-Intel/PowerTrader_AI-macOS-Intel.zip
+            artifacts/PowerTrader_AI-macOS-Intel/dist/PowerTrader_AI-Intel.dmg
             artifacts/PowerTrader_AI-macOS-ARM64/PowerTrader_AI-macOS-ARM64.zip
+            artifacts/PowerTrader_AI-macOS-ARM64/dist/PowerTrader_AI-ARM64.dmg
           body: |
             # PowerTrader AI Release
 
@@ -158,19 +200,43 @@ jobs:
 
             ## Downloads
 
-            Choose the appropriate version for your platform:
+            Choose the appropriate installer or archive for your platform:
 
-            - **Windows (x64)**: `PowerTrader_AI-Windows-x64.zip`
-            - **macOS Intel**: `PowerTrader_AI-macOS-Intel.zip`
-            - **macOS Apple Silicon**: `PowerTrader_AI-macOS-ARM64.zip`
+            ### Windows (x64)
+            - **Installer (Recommended)**: `PowerTrader_AI_Setup.exe` - Double-click to install
+            - **Portable Archive**: `PowerTrader_AI-Windows-x64.zip` - Extract and run
+
+            ### macOS Intel
+            - **DMG Installer (Recommended)**: `PowerTrader_AI-Intel.dmg` - Drag to Applications
+            - **Portable Archive**: `PowerTrader_AI-macOS-Intel.zip` - Extract and run
+
+            ### macOS Apple Silicon (M1/M2/M3)
+            - **DMG Installer (Recommended)**: `PowerTrader_AI-ARM64.dmg` - Drag to Applications
+            - **Portable Archive**: `PowerTrader_AI-macOS-ARM64.zip` - Extract and run
 
             ## Installation
 
-            ### Windows
+            ### Windows Installer
+            1. Download `PowerTrader_AI_Setup.exe`
+            2. Double-click to run the installer
+            3. Follow the installation wizard
+            4. Launch from Start Menu or Desktop shortcut
+
+            ### macOS DMG Installer
+            1. Download the appropriate DMG for your Mac:
+               - Intel Macs: `PowerTrader_AI-Intel.dmg`
+               - Apple Silicon (M1/M2/M3): `PowerTrader_AI-ARM64.dmg`
+            2. Double-click to mount the disk image
+            3. Drag PowerTrader AI to the Applications folder
+            4. Right-click PowerTrader AI in Applications and select "Open" (first time only)
+
+            ### Manual Installation (ZIP Archives)
+
+            #### Windows
             1. Download and extract `PowerTrader_AI-Windows-x64.zip`
             2. Run `PowerTrader_AI\PowerTrader_AI.exe`
 
-            ### macOS
+            #### macOS
             1. Download and extract the appropriate ZIP file for your Mac
             2. Move `PowerTrader_AI.app` to your Applications folder
             3. Right-click and select "Open" the first time (macOS security)
