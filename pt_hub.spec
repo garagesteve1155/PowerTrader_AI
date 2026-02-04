@@ -111,9 +111,8 @@ hiddenimports += [
 # ============================================================================
 
 excludes = [
-    # Testing frameworks
+    # Testing frameworks (keeping unittest as pyparsing needs it)
     'pytest',
-    'unittest',
     '_pytest',
     'nose',
 
