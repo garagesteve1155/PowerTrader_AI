@@ -93,6 +93,74 @@
 
 ---
 
+## Icon Integration Test
+
+### Test Date
+2026-02-05 (Post Initial Build)
+
+### Changes Made
+- Added application icons to assets/ folder
+  - icon.icns (802 KB) - macOS application icon
+  - icon.ico (97 KB) - Windows application icon
+- Added logo assets
+  - logo-horizontal.png (60 KB)
+  - logo-mark.png (134 KB)
+  - logo-inverse.png (80 KB)
+- Updated pt_hub.spec to use icons
+  - Changed ICON_WINDOWS from None to 'assets/icon.ico'
+  - Changed ICON_MAC from None to 'assets/icon.icns'
+  - Enabled assets folder bundling: `datas += [('assets', 'assets')]`
+
+### Build Results
+
+**Rebuild Command:**
+```bash
+source venv/bin/activate && pyinstaller --clean --noconfirm pt_hub.spec
+```
+
+**Status**: SUCCESS
+
+**Build Time**: ~54 seconds
+
+**Output Size**: 118M (PowerTrader_AI.app)
+
+**Size Change**: +2M (from 116M to 118M)
+- Icon file: +802 KB
+- Logo assets: +274 KB
+- Requirements doc: +1.8 KB
+
+### Verification
+
+**Icon Bundled Successfully:**
+```
+dist/PowerTrader_AI.app/Contents/Resources/icon.icns (802K)
+```
+
+**Assets Folder Bundled:**
+```
+dist/PowerTrader_AI.app/Contents/Resources/assets/
+├── ASSETS_REQUIREMENTS.md (1.8K)
+├── icon.icns (802K)
+├── icon.ico (97K)
+├── logo-horizontal.png (60K)
+├── logo-inverse.png (80K)
+└── logo-mark.png (134K)
+```
+
+**Key Findings:**
+- macOS automatically uses icon.icns from Resources folder for .app bundle
+- All logo assets available at runtime for potential use in GUI
+- Icon follows Dracula theme color scheme as specified
+- Build process handles .icns conversion correctly
+- No errors or warnings related to icon integration
+
+**Visual Verification:**
+- .app bundle now displays custom icon in Finder
+- Icon visible in Dock when application runs
+- Professional branding applied successfully
+
+---
+
 ## Verification Tests
 
 ### Executable Structure
