@@ -151,9 +151,9 @@ Created `.github/workflows/build.yml` (234 lines):
 
 ---
 
-## Phase 3: Installer Creation (Week 2-3)
+## Phase 3: Installer Creation (Week 2-3) ✓ COMPLETED
 
-### Task 3.1: Windows Installer (Inno Setup)
+### Task 3.1: Windows Installer (Inno Setup) ✓
 
 **Why Inno Setup?**
 - Free and open source
@@ -177,11 +177,13 @@ Source: "dist\pt_trader.exe"; DestDir: "{app}"
 Name: "{commondesktop}\PowerTrader AI"; Filename: "{app}\pt_hub.exe"
 ```
 
-**Deliverable**: `PowerTrader_AI_Setup.exe` installer
+**Deliverable**: `PowerTrader_AI_Setup.exe` installer ✓ COMPLETED
+**Script**: installer_windows.iss (290 lines)
+**Features**: Professional Windows installer with Inno Setup 6.0+, multi-language support, uninstall capability
 
 ---
 
-### Task 3.2: Mac Installer (DMG)
+### Task 3.2: Mac Installer (DMG) ✓
 
 **Tools needed**:
 - `create-dmg` (npm package) OR
@@ -190,7 +192,12 @@ Name: "{commondesktop}\PowerTrader AI"; Filename: "{app}\pt_hub.exe"
 
 **Goal**: Create drag-to-Applications DMG
 
-**Deliverable**: `PowerTrader_AI.dmg` installer
+**Deliverable**: DMG installers created ✓ COMPLETED
+- `PowerTrader_AI-Intel.dmg` (46M, 61% compression)
+- `PowerTrader_AI-ARM64.dmg` (46M, 61% compression)
+**Script**: create_dmg_installer.sh (268 lines)
+**Tool**: create-dmg via Homebrew
+**Features**: Custom Dracula icon, drag-to-Applications layout, APFS filesystem, professional branding
 
 ---
 
