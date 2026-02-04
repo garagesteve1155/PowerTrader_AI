@@ -33,9 +33,9 @@ APP_NAME = 'PowerTrader_AI'
 ENTRY_POINT = 'pt_hub.py'
 VERSION = '1.0.0'
 
-# Icon files (create these later)
-ICON_WINDOWS = 'assets/icon.ico'
-ICON_MAC = 'assets/icon.icns'
+# Icon files (optional - set to None if not available)
+ICON_WINDOWS = None  # 'assets/icon.ico'
+ICON_MAC = None  # 'assets/icon.icns'
 
 # macOS app bundle identifier
 BUNDLE_ID = 'com.powertrader.ai'
