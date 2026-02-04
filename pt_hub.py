@@ -21,6 +21,9 @@ from matplotlib.patches import Rectangle
 from matplotlib.ticker import FuncFormatter
 from matplotlib.transforms import blended_transform_factory
 
+# PowerTrader utilities for bundled application support
+from pt_utils import get_subprocess_command, is_bundled, get_bundle_dir
+
 DARK_BG = "#070B10"
 DARK_BG2 = "#0B1220"
 DARK_PANEL = "#0E1626"
@@ -3075,7 +3078,10 @@ class PowerTraderHub(tk.Tk):
     def _start_process(self, p: ProcInfo, log_q: Optional["queue.Queue[str]"] = None, prefix: str = "") -> None:
         if p.proc and p.proc.poll() is None:
             return
-        if not os.path.isfile(p.path):
+
+        # In script mode, verify file exists
+        # In bundled mode, path check is handled by get_subprocess_command
+        if not is_bundled() and not os.path.isfile(p.path):
             messagebox.showerror("Missing script", f"Cannot find: {p.path}")
             return
 
@@ -3083,8 +3089,13 @@ class PowerTraderHub(tk.Tk):
         env["POWERTRADER_HUB_DIR"] = self.hub_dir  # so rhcb writes where GUI reads
 
         try:
+            # Use pt_utils to get correct command for bundled/script mode
+            # Extract just the filename for get_subprocess_command
+            script_name = os.path.basename(p.path)
+            cmd = get_subprocess_command(script_name)
+
             p.proc = subprocess.Popen(
-                [sys.executable, "-u", p.path],  # -u for unbuffered prints
+                cmd,
                 cwd=self.project_dir,
                 env=env,
                 stdout=subprocess.PIPE,
@@ -3386,8 +3397,12 @@ class PowerTraderHub(tk.Tk):
 
         try:
             # IMPORTANT: pass `coin` so neural_trainer trains the correct market instead of defaulting to BTC
+            # Use pt_utils to get correct command for bundled/script mode
+            script_name = os.path.basename(info.path)
+            cmd = get_subprocess_command(script_name, [coin])
+
             info.proc = subprocess.Popen(
-                [sys.executable, "-u", info.path, coin],
+                cmd,
                 cwd=coin_cwd,
                 env=env,
                 stdout=subprocess.PIPE,
