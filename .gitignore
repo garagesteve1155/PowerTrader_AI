@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# PyInstaller
+*.spec
+build/
+dist/
+*.manifest
+
+# User data and trading data
+hub_data/
+BTC/
+ETH/
+BNB/
+DOGE/
+XRP/
+LTC/
+ADA/
+SOL/
+AVAX/
+MATIC/
+DOT/
+LINK/
+UNI/
+ATOM/
+XLM/
+*/  # All coin folders
+
+# API keys and secrets
+r_key.txt
+r_secret.txt
+*.key
+*.secret
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# MkDocs
+site/
+
+# Temporary files
+*.tmp
+*.bak
+.~*
