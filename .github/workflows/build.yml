@@ -1,0 +1,234 @@
+name: Build PowerTrader AI
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags (v1.0.0, v1.1.0, etc.)
+  workflow_dispatch:  # Allow manual triggering
+    inputs:
+      create_release:
+        description: 'Create a GitHub release'
+        required: false
+        default: 'true'
+
+jobs:
+  build-windows:
+    name: Build for Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.18.0
+
+      - name: Build executables
+        run: |
+          build_windows.bat
+
+      - name: Create distribution archive
+        run: |
+          cd dist
+          Compress-Archive -Path PowerTrader_AI,pt_thinker,pt_trader -DestinationPath ../PowerTrader_AI-Windows-x64.zip
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PowerTrader_AI-Windows-x64
+          path: PowerTrader_AI-Windows-x64.zip
+          retention-days: 30
+
+  build-macos-intel:
+    name: Build for macOS (Intel)
+    runs-on: macos-13  # Intel-based macOS runner
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.18.0
+
+      - name: Build executables
+        run: |
+          chmod +x build_mac.sh
+          ./build_mac.sh
+
+      - name: Create distribution archive
+        run: |
+          cd dist
+          # Create DMG or ZIP
+          zip -r ../PowerTrader_AI-macOS-Intel.zip PowerTrader_AI.app pt_thinker pt_trader
+
+      - name: Upload macOS Intel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PowerTrader_AI-macOS-Intel
+          path: PowerTrader_AI-macOS-Intel.zip
+          retention-days: 30
+
+  build-macos-arm:
+    name: Build for macOS (Apple Silicon)
+    runs-on: macos-14  # Apple Silicon macOS runner
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.18.0
+
+      - name: Build executables
+        run: |
+          chmod +x build_mac.sh
+          ./build_mac.sh
+
+      - name: Create distribution archive
+        run: |
+          cd dist
+          zip -r ../PowerTrader_AI-macOS-ARM64.zip PowerTrader_AI.app pt_thinker pt_trader
+
+      - name: Upload macOS ARM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PowerTrader_AI-macOS-ARM64
+          path: PowerTrader_AI-macOS-ARM64.zip
+          retention-days: 30
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build-windows, build-macos-intel, build-macos-arm]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/PowerTrader_AI-Windows-x64/PowerTrader_AI-Windows-x64.zip
+            artifacts/PowerTrader_AI-macOS-Intel/PowerTrader_AI-macOS-Intel.zip
+            artifacts/PowerTrader_AI-macOS-ARM64/PowerTrader_AI-macOS-ARM64.zip
+          body: |
+            # PowerTrader AI Release
+
+            Automated crypto trading powered by AI price prediction.
+
+            ## Downloads
+
+            Choose the appropriate version for your platform:
+
+            - **Windows (x64)**: `PowerTrader_AI-Windows-x64.zip`
+            - **macOS Intel**: `PowerTrader_AI-macOS-Intel.zip`
+            - **macOS Apple Silicon**: `PowerTrader_AI-macOS-ARM64.zip`
+
+            ## Installation
+
+            ### Windows
+            1. Download and extract `PowerTrader_AI-Windows-x64.zip`
+            2. Run `PowerTrader_AI\PowerTrader_AI.exe`
+
+            ### macOS
+            1. Download and extract the appropriate ZIP file for your Mac
+            2. Move `PowerTrader_AI.app` to your Applications folder
+            3. Right-click and select "Open" the first time (macOS security)
+
+            ## Important Notes
+
+            This software places real trades automatically. You are responsible for everything it does to your money and your account.
+
+            - Keep your API keys private
+            - Start with small amounts
+            - Monitor the bot regularly
+            - Read the documentation thoroughly
+
+            ## Documentation
+
+            Full documentation available at: [GitHub Repository](https://github.com/${{ github.repository }})
+
+            ## System Requirements
+
+            - **Windows**: Windows 10 or later (64-bit)
+            - **macOS**: macOS 10.15 (Catalina) or later
+
+            ---
+
+            **Note**: These are unsigned applications. You may see security warnings on first launch. This is normal for open-source software without code signing certificates.
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+
+  test-builds:
+    name: Test Built Executables
+    needs: [build-windows, build-macos-intel]
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [windows-latest, macos-13]
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: PowerTrader_AI-${{ matrix.os == 'windows-latest' && 'Windows-x64' || 'macOS-Intel' }}
+
+      - name: Extract and test (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          Expand-Archive PowerTrader_AI-Windows-x64.zip -DestinationPath .
+          # Basic smoke test - verify executables exist
+          Test-Path PowerTrader_AI\PowerTrader_AI.exe
+          Test-Path pt_thinker\pt_thinker.exe
+          Test-Path pt_trader\pt_trader.exe
+
+      - name: Extract and test (macOS)
+        if: matrix.os == 'macos-13'
+        run: |
+          unzip PowerTrader_AI-macOS-Intel.zip
+          # Basic smoke test - verify bundles exist
+          test -d PowerTrader_AI.app
+          test -d pt_thinker
+          test -d pt_trader
