@@ -29,10 +29,10 @@
 AppName=PowerTrader AI
 AppVersion=1.0.0
 AppVerName=PowerTrader AI 1.0.0
-AppPublisher=PowerTrader AI Contributors
-AppPublisherURL=https://github.com/PowerTrader/PowerTrader_AI
-AppSupportURL=https://github.com/PowerTrader/PowerTrader_AI/issues
-AppUpdatesURL=https://github.com/PowerTrader/PowerTrader_AI/releases
+AppPublisher=HMAHD (Akash Hasendra)
+AppPublisherURL=https://github.com/HMAHD/PowerTrader_AI
+AppSupportURL=https://github.com/HMAHD/PowerTrader_AI/issues
+AppUpdatesURL=https://github.com/HMAHD/PowerTrader_AI/releases
 AppCopyright=Copyright (C) 2026 PowerTrader AI Contributors
 
 ; ============================================================================
