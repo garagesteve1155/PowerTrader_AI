@@ -16,10 +16,11 @@ ENV/
 .venv
 
 # PyInstaller
-*.spec
 build/
 dist/
 *.manifest
+# Allow spec files in root (we'll commit these specifically)
+# *.spec is commented out to allow committing spec files
 
 # User data and trading data
 hub_data/
