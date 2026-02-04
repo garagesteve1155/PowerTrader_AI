@@ -173,5 +173,35 @@ PyInstaller created `pt_hub.spec` with the following key sections:
 
 ---
 
-**Build Completed**: 2026-02-05 00:11:34
-**Status**: Ready for testing
+## Build Attempt 2 - 2026-02-05 (Spec File Refactor)
+
+### Changes Made
+- **Converted to onedir mode** to fix PyInstaller 7.0 deprecation warning
+- **Added comprehensive hidden imports**: matplotlib backends, PIL, cryptography modules
+- **Added exclusions**: pytest, unittest, IPython, unused matplotlib backends
+- **Organized spec file**: Clear sections with documentation
+- **Added version information**: CFBundleVersion, app metadata
+- **macOS .app bundle**: Proper Info.plist configuration with dark mode support
+
+### Spec File Structure
+```python
+# Configuration constants
+APP_NAME = 'PowerTrader_AI'
+VERSION = '1.0.0'
+BUNDLE_ID = 'com.powertrader.ai'
+
+# Data files: matplotlib, certifi
+# Hidden imports: matplotlib, PIL, cryptography, kucoin, networking
+# Exclusions: testing frameworks, unused backends
+# Build mode: onedir (COLLECT stage)
+# macOS bundle: Full Info.plist metadata
+```
+
+### Next Build Test Required
+Run `pyinstaller pt_hub.spec` to test the updated configuration.
+
+---
+
+**Initial Build Completed**: 2026-02-05 00:11:34
+**Spec File Refactored**: 2026-02-05 00:17:42
+**Status**: Ready for testing with updated spec file
