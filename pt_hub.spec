@@ -33,9 +33,9 @@ APP_NAME = 'PowerTrader_AI'
 ENTRY_POINT = 'pt_hub.py'
 VERSION = '1.0.0'
 
-# Icon files (optional - set to None if not available)
-ICON_WINDOWS = None  # 'assets/icon.ico'
-ICON_MAC = None  # 'assets/icon.icns'
+# Icon files
+ICON_WINDOWS = 'assets/icon.ico'
+ICON_MAC = 'assets/icon.icns'
 
 # macOS app bundle identifier
 BUNDLE_ID = 'com.powertrader.ai'
@@ -52,8 +52,8 @@ datas += collect_data_files('matplotlib')
 # Certificate bundle for HTTPS requests
 datas += collect_data_files('certifi')
 
-# Future: Add application assets when available
-# datas += [('assets', 'assets')]
+# Application assets (icons and logos)
+datas += [('assets', 'assets')]
 
 # ============================================================================
 # Hidden Imports
