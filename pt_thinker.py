@@ -198,6 +198,21 @@ except Exception:
 
 RUNNER_READY_PATH = os.path.join(HUB_DIR, "runner_ready.json")
 
+_PAPER_RUNTIME_REQUESTED = (
+	os.getenv("PAPER_TRADING_ONLY", "").strip().lower() == "true"
+	or os.getenv("POWERTRADER_EXECUTION_MODE", "").strip().lower() in ("paper", "simulator", "true", "1", "yes")
+	or os.getenv("EXCHANGE_MODE", "").strip().lower() in ("paper", "simulator", "true", "1", "yes")
+)
+NEURAL_SWEEP_LOG_PATH = (
+	os.path.join(HUB_DIR, "paper", "neural_sweep_log.jsonl")
+	if _PAPER_RUNTIME_REQUESTED
+	else os.path.join(HUB_DIR, "neural_sweep_log.jsonl")
+)
+try:
+	os.makedirs(os.path.dirname(NEURAL_SWEEP_LOG_PATH), exist_ok=True)
+except Exception:
+	pass
+
 def _atomic_write_json(path: str, data: dict) -> None:
 	try:
 		tmp = path + ".tmp"
@@ -216,6 +231,78 @@ def _write_runner_ready(ready: bool, stage: str, ready_coins=None, total_coins: 
 		"total_coins": int(total_coins or 0),
 	}
 	_atomic_write_json(RUNNER_READY_PATH, obj)
+
+
+def _append_jsonl(path: str, obj: dict) -> None:
+	try:
+		with open(path, "a", encoding="utf-8") as f:
+			f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+	except Exception:
+		pass
+
+
+def _write_neural_sweep_log(
+	sym: str,
+	current_price: float,
+	messages: list,
+	tf_sides: list,
+	margins: list,
+	perfects: list,
+	training_issues: list,
+	low_bound_prices: list,
+	high_bound_prices: list,
+	low_tf_prices: list,
+	high_tf_prices: list,
+	bounds_version: int,
+	last_display_bounds_version: int,
+	tf_choice_index: int,
+) -> None:
+	try:
+		long_count = int((tf_sides or []).count("long"))
+		short_count = int((tf_sides or []).count("short"))
+		trade_start_level = 3
+		eligible = (long_count >= trade_start_level) and (short_count == 0)
+		if short_count > 0:
+			blocked_reason = "short_signal_present"
+		elif long_count < trade_start_level:
+			blocked_reason = f"long_signal_below_start_level_{trade_start_level}"
+		else:
+			blocked_reason = "eligible"
+
+		tf_rows = []
+		for idx, tf in enumerate(tf_choices):
+			tf_rows.append(
+				{
+					"timeframe": tf,
+					"message": messages[idx] if idx < len(messages) else None,
+					"side": tf_sides[idx] if idx < len(tf_sides) else None,
+					"margin_pct": margins[idx] if idx < len(margins) else None,
+					"perfect_state": perfects[idx] if idx < len(perfects) else None,
+					"training_issue": training_issues[idx] if idx < len(training_issues) else None,
+					"low_bound_price": low_bound_prices[idx] if idx < len(low_bound_prices) else None,
+					"high_bound_price": high_bound_prices[idx] if idx < len(high_bound_prices) else None,
+					"low_prediction_price": low_tf_prices[idx] if idx < len(low_tf_prices) else None,
+					"high_prediction_price": high_tf_prices[idx] if idx < len(high_tf_prices) else None,
+				}
+			)
+
+		record = {
+			"timestamp": time.time(),
+			"coin": sym,
+			"current_price": float(current_price),
+			"bounds_version": int(bounds_version or 0),
+			"last_display_bounds_version": int(last_display_bounds_version or 0),
+			"tf_choice_index": int(tf_choice_index or 0),
+			"trade_start_level": trade_start_level,
+			"long_signal_count": long_count,
+			"short_signal_count": short_count,
+			"eligible_for_trade": bool(eligible),
+			"blocked_reason": blocked_reason,
+			"timeframes": tf_rows,
+		}
+		_append_jsonl(NEURAL_SWEEP_LOG_PATH, record)
+	except Exception:
+		pass
 
 
 # Ensure folders exist for the current configured coins
@@ -1001,6 +1088,23 @@ def step_coin(sym: str):
 				f.write(str(abs(pm)))
 			with open('short_dca_signal.txt', 'w+') as f:
 				f.write(str(shorts))
+
+			_write_neural_sweep_log(
+				sym=sym,
+				current_price=current,
+				messages=messages,
+				tf_sides=tf_sides,
+				margins=margins,
+				perfects=perfects,
+				training_issues=training_issues,
+				low_bound_prices=low_bound_prices,
+				high_bound_prices=high_bound_prices,
+				low_tf_prices=low_tf_prices,
+				high_tf_prices=high_tf_prices,
+				bounds_version=st.get('bounds_version', 0),
+				last_display_bounds_version=st.get('last_display_bounds_version', -1),
+				tf_choice_index=tf_choice_index,
+			)
 
 		except:
 			PrintException()
