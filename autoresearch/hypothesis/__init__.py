@@ -1,0 +1,1 @@
+"""Hypothesis generation for autoresearch."""

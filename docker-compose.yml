@@ -11,14 +11,25 @@ services:
       - DISPLAY_NUM=99
       - SCREEN_WIDTH=1920
       - SCREEN_HEIGHT=1080
+      - PAPER_TRADING_ONLY=true
+      - POWERTRADER_EXECUTION_MODE=paper
+      - EXCHANGE_MODE=SIMULATOR
+      - SIM_INITIAL_USDT=550
+      - POWERTRADER_SIMULATOR_LOG=simulator_trades.json
     ports:
       - "5900:5900"
     restart: unless-stopped
 
   runner:
-    build: .
+    build: . 
     volumes:
       - ./:/app
       - ./hub_data:/app/hub_data
     command: ["python", "pt_thinker.py"]
+    environment:
+      - PAPER_TRADING_ONLY=true
+      - POWERTRADER_EXECUTION_MODE=paper
+      - EXCHANGE_MODE=SIMULATOR
+      - SIM_INITIAL_USDT=550
+      - POWERTRADER_SIMULATOR_LOG=simulator_trades.json
     restart: unless-stopped

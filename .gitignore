@@ -1,0 +1,35 @@
+.env
+kucoin_key.txt
+kucoin_secret.txt
+kucoin_passphrase.txt
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Runtime and generated outputs
+logs/
+hub_data/
+reports/
+autoresearch_runs/
+memories_published/
+document_pack/
+%dst%/
+hub_data_backup_%ts%/
+
+# Generated market/status snapshots
+*_current_price.txt
+alerts_version.txt
+futures_*_onoff.txt
+futures_*_profit_margin.txt
+high_bound_prices.html
+low_bound_prices.html
+long_dca_signal.txt
+short_dca_signal.txt
+trainer_last_start_time.txt
+trainer_last_training_time.txt
+trainer_status.json
+test_simulator_trades.json
+memories_*.txt
+memory_weights*.txt
+neural_perfect_threshold*.txt
