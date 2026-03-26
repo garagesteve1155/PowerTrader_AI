@@ -387,6 +387,108 @@ def _read_trade_history_jsonl(path: str) -> List[dict]:
     return out
 
 
+def _read_jsonl(path: str) -> List[dict]:
+    out: List[dict] = []
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        obj = json.loads(ln)
+                        if isinstance(obj, dict):
+                            out.append(obj)
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+    return out
+
+
+def _summarize_neural_sweeps(entries: List[dict]) -> dict:
+    summary = {
+        "generated_at": time.time(),
+        "sweep_count": len(entries),
+        "coins": {},
+        "coin_order": [],
+        "blocked_reason_counts": {},
+        "eligible_count": 0,
+        "blocked_count": 0,
+        "latest_sweeps": [],
+    }
+
+    latest_by_coin: Dict[str, dict] = {}
+    coin_order: List[str] = []
+    for entry in entries:
+        coin = str(entry.get("coin", "")).strip().upper()
+        if not coin:
+            continue
+        if coin not in latest_by_coin:
+            coin_order.append(coin)
+        latest_by_coin[coin] = entry
+
+        reason = str(entry.get("blocked_reason", "unknown")).strip() or "unknown"
+        summary["blocked_reason_counts"][reason] = int(summary["blocked_reason_counts"].get(reason, 0)) + 1
+        if entry.get("eligible_for_trade"):
+            summary["eligible_count"] += 1
+        else:
+            summary["blocked_count"] += 1
+
+    summary["coin_order"] = coin_order
+
+    for coin in coin_order:
+        entry = latest_by_coin.get(coin) or {}
+        tf_rows = entry.get("timeframes") or []
+        latest_tf = []
+        for row in tf_rows[:]:
+            if isinstance(row, dict):
+                latest_tf.append(
+                    {
+                        "timeframe": row.get("timeframe"),
+                        "message": row.get("message"),
+                        "side": row.get("side"),
+                        "margin_pct": row.get("margin_pct"),
+                        "perfect_state": row.get("perfect_state"),
+                        "training_issue": row.get("training_issue"),
+                    }
+                )
+
+        summary["coins"][coin] = {
+            "timestamp": entry.get("timestamp"),
+            "current_price": entry.get("current_price"),
+            "bounds_version": entry.get("bounds_version"),
+            "last_display_bounds_version": entry.get("last_display_bounds_version"),
+            "long_signal_count": entry.get("long_signal_count", 0),
+            "short_signal_count": entry.get("short_signal_count", 0),
+            "eligible_for_trade": bool(entry.get("eligible_for_trade")),
+            "blocked_reason": entry.get("blocked_reason"),
+            "trade_start_level": entry.get("trade_start_level"),
+            "timeframes": latest_tf,
+        }
+
+        summary["latest_sweeps"].append(
+            {
+                "coin": coin,
+                "timestamp": entry.get("timestamp"),
+                "eligible_for_trade": bool(entry.get("eligible_for_trade")),
+                "blocked_reason": entry.get("blocked_reason"),
+                "long_signal_count": entry.get("long_signal_count", 0),
+                "short_signal_count": entry.get("short_signal_count", 0),
+            }
+        )
+
+    return summary
+
+
+def _write_neural_sweep_summary(path: str, summary: dict) -> None:
+    try:
+        _safe_write_json(path, summary)
+    except Exception:
+        pass
+
+
 def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
@@ -2338,6 +2440,20 @@ class PowerTraderHub(tk.Tk):
         self.lbl_neural_overview_last = ttk.Label(legend, text="Last: N/A")
         self.lbl_neural_overview_last.pack(side="right")
 
+        sweep_panel = ttk.Frame(neural_box)
+        sweep_panel.pack(fill="x", padx=6, pady=(4, 0))
+
+        self.lbl_neural_sweep_summary = ttk.Label(sweep_panel, text="Sweep summary: N/A")
+        self.lbl_neural_sweep_summary.pack(anchor="w")
+
+        self.lbl_neural_sweep_latest = ttk.Label(
+            sweep_panel,
+            text="Latest sweep: N/A",
+            wraplength=1200,
+            justify="left",
+        )
+        self.lbl_neural_sweep_latest.pack(anchor="w", pady=(2, 0))
+
         # Scrollable area for tiles (auto-hides the scrollbar if everything fits)
         neural_viewport = ttk.Frame(neural_box)
         neural_viewport.pack(fill="both", expand=True, padx=6, pady=(4, 6))
@@ -4185,6 +4301,8 @@ class PowerTraderHub(tk.Tk):
 
         if not hasattr(self, "_neural_overview_cache"):
             self._neural_overview_cache = {}  # path -> (mtime, value)
+        if not hasattr(self, "_neural_sweep_cache"):
+            self._neural_sweep_cache = {}  # path -> (mtime, summary)
 
         def _cached(path: str, loader, default: Any):
             try:
@@ -4259,6 +4377,63 @@ class PowerTraderHub(tk.Tk):
                     )
                 else:
                     self.lbl_neural_overview_last.config(text="Last: N/A")
+        except Exception:
+            pass
+
+        # Summarize the sweep log for the UI and write a report artifact.
+        try:
+            sweep_path = os.path.join(self.hub_dir, "paper", "neural_sweep_log.jsonl")
+            summary_path = os.path.join(self.hub_dir, "paper", "neural_sweep_summary.json")
+
+            sweep_summary = None
+            try:
+                mtime = os.path.getmtime(sweep_path)
+            except Exception:
+                mtime = None
+
+            if mtime is not None:
+                hit = self._neural_sweep_cache.get(sweep_path)
+                if hit and hit[0] == mtime:
+                    sweep_summary = hit[1]
+                else:
+                    entries = _read_jsonl(sweep_path)
+                    sweep_summary = _summarize_neural_sweeps(entries)
+                    self._neural_sweep_cache[sweep_path] = (mtime, sweep_summary)
+                    _write_neural_sweep_summary(summary_path, sweep_summary)
+
+            if sweep_summary is None:
+                sweep_summary = {
+                    "sweep_count": 0,
+                    "eligible_count": 0,
+                    "blocked_count": 0,
+                    "blocked_reason_counts": {},
+                    "latest_sweeps": [],
+                    "coins": {},
+                }
+
+            if hasattr(self, "lbl_neural_sweep_summary") and self.lbl_neural_sweep_summary.winfo_exists():
+                self.lbl_neural_sweep_summary.config(
+                    text=(
+                        f"Sweep summary: {int(sweep_summary.get('sweep_count', 0))} records | "
+                        f"eligible {int(sweep_summary.get('eligible_count', 0))} | "
+                        f"blocked {int(sweep_summary.get('blocked_count', 0))}"
+                    )
+                )
+
+            latest_lines = []
+            for item in sweep_summary.get("latest_sweeps", [])[:5]:
+                coin = str(item.get("coin", "")).strip().upper() or "?"
+                reason = str(item.get("blocked_reason", "unknown")).strip() or "unknown"
+                long_n = int(item.get("long_signal_count", 0) or 0)
+                short_n = int(item.get("short_signal_count", 0) or 0)
+                state = "eligible" if item.get("eligible_for_trade") else f"blocked: {reason}"
+                latest_lines.append(f"{coin} L:{long_n} S:{short_n} {state}")
+
+            if hasattr(self, "lbl_neural_sweep_latest") and self.lbl_neural_sweep_latest.winfo_exists():
+                if latest_lines:
+                    self.lbl_neural_sweep_latest.config(text="Latest sweep: " + " | ".join(latest_lines))
+                else:
+                    self.lbl_neural_sweep_latest.config(text="Latest sweep: N/A")
         except Exception:
             pass
 
