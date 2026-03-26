@@ -1,0 +1,24 @@
+version: '3.8'
+services:
+  hub:
+    build: .
+    volumes:
+      - ./:/app
+      - ./hub_data:/app/hub_data
+    command: ["python", "pt_hub.py"]
+    environment:
+      - ENABLE_VNC=1
+      - DISPLAY_NUM=99
+      - SCREEN_WIDTH=1920
+      - SCREEN_HEIGHT=1080
+    ports:
+      - "5900:5900"
+    restart: unless-stopped
+
+  runner:
+    build: .
+    volumes:
+      - ./:/app
+      - ./hub_data:/app/hub_data
+    command: ["python", "pt_thinker.py"]
+    restart: unless-stopped

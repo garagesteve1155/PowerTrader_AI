@@ -1784,7 +1784,7 @@ class PowerTraderHub(tk.Tk):
                 ],
             )
 
-            # Charts tabs need to wrap to multiple lines. ttk.Notebook can't do that,
+            # Charts tabs need to wrap to multiple lines. ttk
             # so we hide the Notebook's native tabs and render our own wrapping tab bar.
             #
             # IMPORTANT: the layout must exclude Notebook.tab entirely, and on some themes
@@ -3158,8 +3158,9 @@ class PowerTraderHub(tk.Tk):
         if not bool(getattr(self, "_auto_start_trader_pending", False)):
             return
 
-        # If runner died, stop waiting
-        if not (self.proc_neural.proc and self.proc_neural.proc.poll() is None):
+        # If a local runner subprocess existed and has terminated, stop waiting.
+        # Allow waiting to continue if no local subprocess was started (external runner/container).
+        if self.proc_neural.proc and self.proc_neural.proc.poll() is not None:
             self._auto_start_trader_pending = False
             return
 
@@ -4580,10 +4581,10 @@ class PowerTraderHub(tk.Tk):
         add_row(r, "pt_trainer.py path:", trainer_script_var); r += 1
         add_row(r, "pt_trader.py path:", trader_script_var); r += 1
 
-        # --- Robinhood API setup (writes r_key.txt + r_secret.txt used by pt_trader.py) ---
+        # --- KuCoin API setup (writes kucoin_keys.txt used by pt_trader.py) ---
         def _api_paths() -> Tuple[str, str]:
-            key_path = os.path.join(self.project_dir, "r_key.txt")
-            secret_path = os.path.join(self.project_dir, "r_secret.txt")
+            key_path = os.path.join(self.project_dir, "kucoin_keys.txt")
+            secret_path = os.path.join(self.project_dir, "kucoin_keys.txt")
             return key_path, secret_path
 
         def _read_api_files() -> Tuple[str, str]:
@@ -4603,6 +4604,13 @@ class PowerTraderHub(tk.Tk):
         api_status_var = tk.StringVar(value="")
 
         def _refresh_api_status() -> None:
+            api_key, api_secret, api_passphrase = load_kucoin_credentials()
+            if api_key and api_secret and api_passphrase:
+                api_status_var.set("Configured âœ… (KuCoin credentials found)")
+            else:
+                api_status_var.set("Not configured âŒ (missing kucoin_keys.txt or env vars)")
+            return
+
             key_path, secret_path = _api_paths()
             k, s = _read_api_files()
 
@@ -4669,6 +4677,22 @@ class PowerTraderHub(tk.Tk):
             import platform
             from datetime import datetime
             import time
+
+            template_path = os.path.join(self.project_dir, "kucoin_keys.txt")
+            if not os.path.isfile(template_path):
+                try:
+                    with open(template_path, "w", encoding="utf-8") as f:
+                        f.write("API_KEY=\nAPI_SECRET=\nAPI_PASSPHRASE=\n")
+                except Exception as e:
+                    messagebox.showerror("KuCoin setup", f"Couldn't create kucoin_keys.txt.\n\nError:\n{e}")
+                    return
+
+            messagebox.showinfo(
+                "KuCoin setup",
+                "KuCoin credentials are read from kucoin_keys.txt or environment variables.\n\n"
+                "Fill in API_KEY, API_SECRET, and API_PASSPHRASE in the template file if you want file-based config."
+            )
+            return
 
             # Friendly dependency errors (laymen-proof)
             try:
@@ -5159,14 +5183,14 @@ class PowerTraderHub(tk.Tk):
             ttk.Button(save_btns, text="Save", command=do_save).pack(side="left")
             ttk.Button(save_btns, text="Close", command=wiz.destroy).pack(side="left", padx=8)
 
-        ttk.Label(frm, text="Robinhood API:").grid(row=r, column=0, sticky="w", padx=(0, 10), pady=6)
+        ttk.Label(frm, text="KuCoin API:").grid(row=r, column=0, sticky="w", padx=(0, 10), pady=6)
 
         api_row = ttk.Frame(frm)
         api_row.grid(row=r, column=1, columnspan=2, sticky="ew", pady=6)
         api_row.columnconfigure(0, weight=1)
 
         ttk.Label(api_row, textvariable=api_status_var).grid(row=0, column=0, sticky="w")
-        ttk.Button(api_row, text="Setup Wizard", command=_open_robinhood_api_wizard).grid(row=0, column=1, sticky="e", padx=(10, 0))
+        ttk.Button(api_row, text="Setup Guide", command=_open_robinhood_api_wizard).grid(row=0, column=1, sticky="e", padx=(10, 0))
         ttk.Button(api_row, text="Open Folder", command=_open_api_folder).grid(row=0, column=2, sticky="e", padx=(8, 0))
         ttk.Button(api_row, text="Clear", command=_clear_api_files).grid(row=0, column=3, sticky="e", padx=(8, 0))
 

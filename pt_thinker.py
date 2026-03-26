@@ -1,14 +1,10 @@
 import os
 import time
 import random
-import requests
-from kucoin.client import Market
-market = Market(url='https://api.kucoin.com')
 import sys
 import datetime
 import traceback
 import linecache
-import base64
 import calendar
 import hashlib
 import hmac
@@ -18,102 +14,64 @@ import logging
 import json
 import uuid
 
-from nacl.signing import SigningKey
-
-# -----------------------------
-# Robinhood market-data (current ASK), same source as rhcb.py trader:
-#   GET /api/v1/crypto/marketdata/best_bid_ask/?symbol=BTC-USD
-#   use result["ask_inclusive_of_buy_spread"]
-# -----------------------------
-ROBINHOOD_BASE_URL = "https://trading.robinhood.com"
-
-_RH_MD = None  # lazy-init so import doesn't explode if creds missing
+from pt_exchange_api import get_current_price as exchange_get_current_price
 
 
-class RobinhoodMarketData:
-    def __init__(self, api_key: str, base64_private_key: str, base_url: str = ROBINHOOD_BASE_URL, timeout: int = 10):
-        self.api_key = (api_key or "").strip()
-        self.base_url = (base_url or "").rstrip("/")
-        self.timeout = timeout
-
-        if not self.api_key:
-            raise RuntimeError("Robinhood API key is empty (r_key.txt).")
-
-        try:
-            raw_private = base64.b64decode((base64_private_key or "").strip())
-            self.private_key = SigningKey(raw_private)
-        except Exception as e:
-            raise RuntimeError(f"Failed to decode Robinhood private key (r_secret.txt): {e}")
-
-        self.session = requests.Session()
-
-    def _get_current_timestamp(self) -> int:
-        return int(time.time())
-
-    def _get_authorization_header(self, method: str, path: str, body: str, timestamp: int) -> dict:
-        # matches the trader's signing format
-        method = method.upper()
-        body = body or ""
-        message_to_sign = f"{self.api_key}{timestamp}{path}{method}{body}"
-        signed = self.private_key.sign(message_to_sign.encode("utf-8"))
-        signature_b64 = base64.b64encode(signed.signature).decode("utf-8")
-
-        return {
-            "x-api-key": self.api_key,
-            "x-timestamp": str(timestamp),
-            "x-signature": signature_b64,
-            "Content-Type": "application/json",
-        }
-
-    def make_api_request(self, method: str, path: str, body: str = "") -> dict:
-        url = f"{self.base_url}{path}"
-        ts = self._get_current_timestamp()
-        headers = self._get_authorization_header(method, path, body, ts)
-
-        resp = self.session.request(method=method.upper(), url=url, headers=headers, data=body or None, timeout=self.timeout)
-        if resp.status_code >= 400:
-            raise RuntimeError(f"Robinhood HTTP {resp.status_code}: {resp.text}")
-        return resp.json()
-
-    def get_current_ask(self, symbol: str) -> float:
-        symbol = (symbol or "").strip().upper()
-        path = f"/api/v1/crypto/marketdata/best_bid_ask/?symbol={symbol}"
-        data = self.make_api_request("GET", path)
-
-        if not data or "results" not in data or not data["results"]:
-            raise RuntimeError(f"Robinhood best_bid_ask returned no results for {symbol}: {data}")
-
-        result = data["results"][0]
-        # EXACTLY like rhcb.py's get_price(): ask_inclusive_of_buy_spread
-        return float(result["ask_inclusive_of_buy_spread"])
+_KUCOIN_TIMEFRAME_SECONDS = {
+	"1min": 60,
+	"5min": 300,
+	"15min": 900,
+	"30min": 1800,
+	"1hour": 3600,
+	"2hour": 7200,
+	"4hour": 14400,
+	"8hour": 28800,
+	"12hour": 43200,
+	"1day": 86400,
+	"1week": 604800,
+}
 
 
-def robinhood_current_ask(symbol: str) -> float:
-    """
-    Returns Robinhood current BUY price (ask_inclusive_of_buy_spread) for symbols like 'BTC-USD'.
-    Reads creds from r_key.txt and r_secret.txt in the same folder as this script.
-    """
-    global _RH_MD
-    if _RH_MD is None:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        key_path = os.path.join(base_dir, "r_key.txt")
-        secret_path = os.path.join(base_dir, "r_secret.txt")
+def kucoin_current_ask(symbol: str) -> float:
+    """Return the latest KuCoin price for a symbol like BTC, BTC-USDT, or BTC-USD."""
+    symbol = (symbol or "").strip().upper()
+    if symbol.endswith("-USD"):
+        symbol = symbol[:-4]
+    if symbol.endswith("-USDT"):
+        symbol = symbol[:-5]
 
-        if not os.path.isfile(key_path) or not os.path.isfile(secret_path):
-            raise RuntimeError(
-                "Missing r_key.txt and/or r_secret.txt next to pt_thinker.py. "
-                "Run pt_trader.py once to create them (and to set your Robinhood API key)."
-            )
+    price = exchange_get_current_price(symbol)
+    if price is None:
+        raise RuntimeError(f"Unable to fetch KuCoin price for {symbol}")
+    return float(price)
 
 
-        with open(key_path, "r", encoding="utf-8") as f:
-            api_key = f.read()
-        with open(secret_path, "r", encoding="utf-8") as f:
-            priv_b64 = f.read()
+def kucoin_get_klines(symbol: str, timeframe: str, limit: int = 2) -> list:
+	"""Fetch recent KuCoin candles oldest->newest for a symbol/timeframe."""
+	symbol = (symbol or "").strip().upper()
+	if symbol.endswith("-USD"):
+		symbol = symbol[:-4]
+	if symbol.endswith("-USDT"):
+		symbol = symbol[:-5]
 
-        _RH_MD = RobinhoodMarketData(api_key=api_key, base64_private_key=priv_b64)
+	pair = f"{symbol}-USDT"
+	tf_seconds = _KUCOIN_TIMEFRAME_SECONDS.get(timeframe, 3600)
+	end_at = int(time.time())
+	start_at = end_at - (tf_seconds * max(10, (int(limit) if limit else 2) + 5))
 
-    return _RH_MD.get_current_ask(symbol)
+	import requests
+
+	resp = requests.get(
+		"https://api.kucoin.com/api/v1/market/candles",
+		params={"symbol": pair, "type": timeframe, "startAt": start_at, "endAt": end_at},
+		timeout=10,
+	)
+	data = resp.json().get("data", [])
+	candles = list(data or [])
+	candles.sort(key=lambda row: int(float(row[0])))
+	if limit and len(candles) > limit:
+		candles = candles[-limit:]
+	return candles
 
 
 def restart_program():
@@ -397,7 +355,10 @@ def init_coin(sym: str):
 		history_list = []
 		while True:
 			try:
-				history = str(market.get_kline(coin, tf_choices[ind])).replace(']]', '], ').replace('[[', '[')
+				history_list = kucoin_get_klines(coin, tf_choices[ind], limit=2)
+				if len(history_list) < 2:
+					time.sleep(0.2)
+					continue
 				break
 			except Exception as e:
 				time.sleep(3.5)
@@ -407,11 +368,9 @@ def init_coin(sym: str):
 					PrintException()
 				continue
 
-		history_list = history.split("], [")
 		ind += 1
 		try:
-			working_minute = str(history_list[1]).replace('"', '').replace("'", "").split(", ")
-			the_time = working_minute[0].replace('[', '')
+			the_time = str(history_list[1][0])
 		except Exception:
 			the_time = 0.0
 
@@ -553,7 +512,10 @@ def step_coin(sym: str):
 		history_list = []
 		while True:
 			try:
-				history = str(market.get_kline(coin, tf_choices[tf_choice_index])).replace(']]', '], ').replace('[[', '[')
+				history_list = kucoin_get_klines(coin, tf_choices[tf_choice_index], limit=2)
+				if len(history_list) < 2:
+					time.sleep(0.2)
+					continue
 				break
 			except Exception as e:
 				time.sleep(3.5)
@@ -562,16 +524,14 @@ def step_coin(sym: str):
 				else:
 					pass
 				continue
-		history_list = history.split("], [")
 		# KuCoin can occasionally return an empty/short kline response.
 		# Guard against history_list[1] raising IndexError.
 		if len(history_list) < 2:
 			time.sleep(0.2)
 			continue
-		working_minute = str(history_list[1]).replace('"', '').replace("'", "").split(", ")
 		try:
-			openPrice = float(working_minute[1])
-			closePrice = float(working_minute[2])
+			openPrice = float(history_list[1][1])
+			closePrice = float(history_list[1][2])
 			break
 		except Exception:
 			continue
@@ -740,11 +700,11 @@ def step_coin(sym: str):
 		# reset tf_update for this coin (but DO NOT block-wait; just detect updates and return)
 		tf_update = ['no'] * len(tf_choices)
 
-		# get current price ONCE per coin — use Robinhood's current ASK (same as rhcb trader buy price)
-		rh_symbol = f"{sym}-USD"
+		# get current price ONCE per coin using the KuCoin exchange abstraction
+		price_symbol = f"{sym}-USDT"
 		while True:
 			try:
-				current = robinhood_current_ask(rh_symbol)
+				current = kucoin_current_ask(price_symbol)
 				break
 			except Exception as e:
 				print(e)
@@ -791,7 +751,10 @@ def step_coin(sym: str):
 			while True:
 
 				try:
-					history = str(market.get_kline(coin, tf_choices[inder])).replace(']]', '], ').replace('[[', '[')
+					history_list = kucoin_get_klines(coin, tf_choices[inder], limit=2)
+					if len(history_list) < 2:
+						time.sleep(0.2)
+						continue
 					break
 				except Exception as e:
 					time.sleep(3.5)
@@ -801,10 +764,8 @@ def step_coin(sym: str):
 						PrintException()
 					continue
 
-			history_list = history.split("], [")
 			try:
-				working_minute = str(history_list[1]).replace('"', '').replace("'", "").split(", ")
-				the_time = working_minute[0].replace('[', '')
+				the_time = str(history_list[1][0])
 			except Exception:
 				the_time = 0.0
 
@@ -1049,7 +1010,10 @@ def step_coin(sym: str):
 		while this_index_now < len(tf_update):
 			while True:
 				try:
-					history = str(market.get_kline(coin, tf_choices[this_index_now])).replace(']]', '], ').replace('[[', '[')
+					history_list = kucoin_get_klines(coin, tf_choices[this_index_now], limit=2)
+					if len(history_list) < 2:
+						time.sleep(0.2)
+						continue
 					break
 				except Exception as e:
 					time.sleep(3.5)
@@ -1059,10 +1023,8 @@ def step_coin(sym: str):
 						PrintException()
 					continue
 
-			history_list = history.split("], [")
 			try:
-				working_minute = str(history_list[1]).replace('"', '').replace("'", "").split(", ")
-				the_time = working_minute[0].replace('[', '')
+				the_time = str(history_list[1][0])
 			except Exception:
 				the_time = 0.0
 

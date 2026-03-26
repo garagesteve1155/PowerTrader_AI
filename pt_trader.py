@@ -13,6 +13,16 @@ from colorama import Fore, Style
 import traceback
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from cryptography.hazmat.primitives import serialization
+from pt_exchange_api import (
+    initialize_exchange,
+    buy as exchange_buy,
+    sell as exchange_sell,
+    get_exchange_mode,
+    get_balance as exchange_get_balance,
+    get_current_price as exchange_get_current_price,
+    get_trade_history as exchange_get_trade_history,
+)
+from pt_kucoin_api import load_kucoin_credentials
 
 # -----------------------------
 # GUI HUB OUTPUTS
@@ -20,10 +30,23 @@ from cryptography.hazmat.primitives import serialization
 HUB_DATA_DIR = os.environ.get("POWERTRADER_HUB_DIR", os.path.join(os.path.dirname(__file__), "hub_data"))
 os.makedirs(HUB_DATA_DIR, exist_ok=True)
 
-TRADER_STATUS_PATH = os.path.join(HUB_DATA_DIR, "trader_status.json")
-TRADE_HISTORY_PATH = os.path.join(HUB_DATA_DIR, "trade_history.jsonl")
-PNL_LEDGER_PATH = os.path.join(HUB_DATA_DIR, "pnl_ledger.json")
-ACCOUNT_VALUE_HISTORY_PATH = os.path.join(HUB_DATA_DIR, "account_value_history.jsonl")
+_EXPLICIT_MODE = (os.getenv("POWERTRADER_EXECUTION_MODE") or os.getenv("EXCHANGE_MODE") or "").strip().lower()
+_PAPER_REQUESTED = (os.getenv("PAPER_TRADING_ONLY", "").strip().lower() == "true") or _EXPLICIT_MODE in ("paper", "simulator", "true", "1", "yes")
+RUNTIME_DATA_DIR = os.path.join(HUB_DATA_DIR, "paper") if _PAPER_REQUESTED else HUB_DATA_DIR
+os.makedirs(RUNTIME_DATA_DIR, exist_ok=True)
+
+TRADER_STATUS_PATH = os.path.join(RUNTIME_DATA_DIR, "trader_status.json")
+TRADE_HISTORY_PATH = os.path.join(RUNTIME_DATA_DIR, "trade_history.jsonl")
+PNL_LEDGER_PATH = os.path.join(RUNTIME_DATA_DIR, "pnl_ledger.json")
+ACCOUNT_VALUE_HISTORY_PATH = os.path.join(RUNTIME_DATA_DIR, "account_value_history.jsonl")
+SIMULATOR_LOG_PATH = os.path.join(RUNTIME_DATA_DIR, "simulator_trades.json")
+os.environ.setdefault("POWERTRADER_SIMULATOR_LOG", SIMULATOR_LOG_PATH)
+if _PAPER_REQUESTED:
+    os.environ.setdefault("PAPER_TRADING_ONLY", "true")
+    os.environ.setdefault("EXCHANGE_MODE", "SIMULATOR")
+    os.environ.setdefault("POWERTRADER_EXECUTION_MODE", "paper")
+else:
+    os.environ.setdefault("POWERTRADER_EXECUTION_MODE", "live")
 
 
 
@@ -320,27 +343,43 @@ def _refresh_paths_and_symbols():
 
 
 
-#API STUFF
+# API STUFF
+# Allow running `pt_trader.py` in paper/simulator mode without live API keys.
 API_KEY = ""
 BASE64_PRIVATE_KEY = ""
 
-try:
-    with open('r_key.txt', 'r', encoding='utf-8') as f:
-        API_KEY = (f.read() or "").strip()
-    with open('r_secret.txt', 'r', encoding='utf-8') as f:
-        BASE64_PRIVATE_KEY = (f.read() or "").strip()
-except Exception:
-    API_KEY = ""
-    BASE64_PRIVATE_KEY = ""
+# If PAPER_TRADING_ONLY is set, we will run in simulator mode and do not require
+# live KuCoin API credentials. Otherwise, attempt to read credentials and
+# exit if they're missing.
+PAPER_ONLY = os.getenv('PAPER_TRADING_ONLY', '').lower() == 'true'
+if not PAPER_ONLY:
+    try:
+        api_key, api_secret, api_passphrase = load_kucoin_credentials()
+        if not api_key or not api_secret or not api_passphrase:
+            raise ValueError("Kucoin credentials are missing.")
+        initialize_exchange(mode='KUCOIN_REAL', initial_usdt=float(os.getenv('SIM_INITIAL_USDT', '50')))
+    except Exception as e:
+        print(f"[PowerTrader] Failed to initialize Kucoin exchange: {e}")
+        raise SystemExit(1)
+else:
+    print("[PowerTrader] PAPER_TRADING_ONLY detected — running in SIMULATOR mode without live API keys.")
 
-if not API_KEY or not BASE64_PRIVATE_KEY:
-    print(
-        "\n[PowerTrader] Robinhood API credentials not found.\n"
-        "Open the GUI and go to Settings → Robinhood API → Setup / Update.\n"
-        "That wizard will generate your keypair, tell you where to paste the public key on Robinhood,\n"
-        "and will save r_key.txt + r_secret.txt so this trader can authenticate.\n"
-    )
-    raise SystemExit(1)
+# Initialize optional exchange adapter (SIMULATOR or KUCOIN_REAL)
+EXCHANGE_MODE = os.getenv('EXCHANGE_MODE', os.getenv('PAPER_TRADING_ONLY', 'false')).upper()
+if EXCHANGE_MODE in ('TRUE', 'FALSE'):
+    # PAPER_TRADING_ONLY may be 'true'/'false'
+    if EXCHANGE_MODE == 'TRUE' or os.getenv('PAPER_TRADING_ONLY', '').lower() == 'true':
+        EXCHANGE_MODE = 'SIMULATOR'
+    else:
+        EXCHANGE_MODE = 'SIMULATOR'
+
+try:
+    if os.getenv('PAPER_TRADING_ONLY', '').lower() == 'true':
+        initialize_exchange(mode='SIMULATOR', initial_usdt=float(os.getenv('SIM_INITIAL_USDT', '50')))
+    elif os.getenv('EXCHANGE_MODE'):
+        initialize_exchange(mode=os.getenv('EXCHANGE_MODE'), initial_usdt=float(os.getenv('SIM_INITIAL_USDT', '50')))
+except Exception:
+    pass
 
 class CryptoAPITrading:
     def __init__(self):
@@ -348,9 +387,15 @@ class CryptoAPITrading:
         self.path_map = dict(base_paths)
 
         self.api_key = API_KEY
-        private_key_seed = base64.b64decode(BASE64_PRIVATE_KEY)
-        self.private_key = SigningKey(private_key_seed)
-        self.base_url = "https://trading.robinhood.com"
+        self.private_key = None
+        if BASE64_PRIVATE_KEY:
+            try:
+                private_key_seed = base64.b64decode(BASE64_PRIVATE_KEY)
+                if private_key_seed:
+                    self.private_key = SigningKey(private_key_seed)
+            except Exception:
+                self.private_key = None
+        self.base_url = "https://api.kucoin.com"
 
         self.dca_levels_triggered = {}  # Track DCA levels for each crypto
         self.dca_levels = list(DCA_LEVELS)  # Hard DCA triggers (percent PnL)
@@ -557,7 +602,7 @@ class CryptoAPITrading:
     def _reconcile_pending_orders(self) -> None:
         """
         If the hub/trader restarts mid-order, we keep the pre-order buying_power on disk and
-        finish the accounting once the order shows as terminal in Robinhood.
+        finish the accounting once the order shows as terminal in the exchange adapter.
         """
         try:
             pending = self._pnl_ledger.get("pending_orders", {})
@@ -942,14 +987,21 @@ class CryptoAPITrading:
                 print(f"No filled buy or sell orders for {full_symbol}. Skipping.")
                 continue
 
+            def _order_ts(order):
+                raw_ts = order.get("created_at", order.get("createdAt", 0))
+                try:
+                    return float(raw_ts or 0)
+                except Exception:
+                    return 0.0
+
             # Sort orders by creation time in ascending order (oldest first)
-            filled_orders.sort(key=lambda x: x["created_at"])
+            filled_orders.sort(key=_order_ts)
 
             # Find the timestamp of the most recent sell order
             most_recent_sell_time = None
             for order in reversed(filled_orders):
                 if order["side"] == "sell":
-                    most_recent_sell_time = order["created_at"]
+                    most_recent_sell_time = _order_ts(order)
                     break
 
             # Determine the cutoff time for buy orders
@@ -957,7 +1009,7 @@ class CryptoAPITrading:
                 # Find all buy orders after the most recent sell
                 relevant_buy_orders = [
                     order for order in filled_orders
-                    if order["side"] == "buy" and order["created_at"] > most_recent_sell_time
+                    if order["side"] == "buy" and _order_ts(order) > most_recent_sell_time
                 ]
                 if not relevant_buy_orders:
                     print(f"No buy orders after the most recent sell for {full_symbol}.")
@@ -977,16 +1029,16 @@ class CryptoAPITrading:
                 print(f"No sell orders found for {full_symbol}. Considering all buy orders.")
 
             # Ensure buy orders are sorted by creation time ascending
-            relevant_buy_orders.sort(key=lambda x: x["created_at"])
+            relevant_buy_orders.sort(key=_order_ts)
 
             # Identify the first buy order in the relevant list
             first_buy_order = relevant_buy_orders[0]
-            first_buy_time = first_buy_order["created_at"]
+            first_buy_time = _order_ts(first_buy_order)
 
             # Count the number of buy orders after the first buy
             buy_orders_after_first = [
                 order for order in relevant_buy_orders
-                if order["created_at"] > first_buy_time
+                if _order_ts(order) > first_buy_time
             ]
 
             triggered_levels_count = len(buy_orders_after_first)
@@ -1121,6 +1173,8 @@ class CryptoAPITrading:
     def get_authorization_header(
             self, method: str, path: str, body: str, timestamp: int
     ) -> Dict[str, str]:
+        if not self.private_key or not self.api_key:
+            raise RuntimeError("Trading API signing credentials are not configured for this process.")
         message_to_sign = f"{self.api_key}{timestamp}{path}{method}{body}"
         signed = self.private_key.sign(message_to_sign.encode("utf-8"))
 
@@ -1131,82 +1185,74 @@ class CryptoAPITrading:
         }
 
     def get_account(self) -> Any:
-        path = "/api/v1/crypto/trading/accounts/"
-        return self.make_api_request("GET", path)
-
-    def get_holdings(self) -> Any:
-        path = "/api/v1/crypto/trading/holdings/"
-        return self.make_api_request("GET", path)
-
-    def get_trading_pairs(self) -> Any:
-        path = "/api/v1/crypto/trading/trading_pairs/"
-        response = self.make_api_request("GET", path)
-
-        if not response or "results" not in response:
-            return []
-
-        trading_pairs = response.get("results", [])
-        if not trading_pairs:
-            return []
-
-        return trading_pairs
-
-    def get_orders(self, symbol: str) -> Any:
-        path = f"/api/v1/crypto/trading/orders/?symbol={symbol}"
-        return self.make_api_request("GET", path)
-
-    def calculate_cost_basis(self):
-        holdings = self.get_holdings()
-        if not holdings or "results" not in holdings:
-            return {}
-
-        active_assets = {holding["asset_code"] for holding in holdings.get("results", [])}
-        current_quantities = {
-            holding["asset_code"]: float(holding["total_quantity"])
-            for holding in holdings.get("results", [])
+        balance = exchange_get_balance() or {}
+        return {
+            "buying_power": float(balance.get("usdt", 0.0) or 0.0),
+            "results": [
+                {
+                    "currency": "USDT",
+                    "available": float(balance.get("usdt", 0.0) or 0.0),
+                    "buying_power": float(balance.get("usdt", 0.0) or 0.0),
+                }
+            ],
         }
 
-        cost_basis = {}
-
-        for asset_code in active_assets:
-            orders = self.get_orders(f"{asset_code}-USD")
-            if not orders or "results" not in orders:
+    def get_holdings(self) -> Any:
+        balance = exchange_get_balance() or {}
+        holdings = []
+        for symbol, pos in (balance.get("positions") or {}).items():
+            qty = float((pos or {}).get("qty", 0.0) or 0.0)
+            if qty <= 0:
                 continue
+            holdings.append(
+                {
+                    "asset_code": str(symbol).split("-")[0],
+                    "total_quantity": qty,
+                    "average_price": float((pos or {}).get("entry_price", 0.0) or 0.0),
+                }
+            )
+        return {"results": holdings}
 
-            # Get all filled buy orders, sorted from most recent to oldest
-            buy_orders = [
-                order for order in orders["results"]
-                if order["side"] == "buy" and order["state"] == "filled"
-            ]
-            buy_orders.sort(key=lambda x: x["created_at"], reverse=True)
+    def get_trading_pairs(self) -> Any:
+        pairs = []
+        for coin in (self.path_map.keys() if isinstance(self.path_map, dict) else []):
+            if coin and coin != "BTC":
+                pairs.append({"symbol": f"{coin}-USDT"})
+        return pairs
 
-            remaining_quantity = current_quantities[asset_code]
-            total_cost = 0.0
+    def get_orders(self, symbol: str) -> Any:
+        base_symbol = str(symbol or "").strip().upper()
+        if base_symbol.endswith("-USD"):
+            base_symbol = base_symbol[:-4]
+        if not base_symbol.endswith("-USDT"):
+            base_symbol = f"{base_symbol}-USDT"
+        history = exchange_get_trade_history(base_symbol, limit=200) or []
+        results = []
+        for trade in history:
+            results.append(
+                {
+                    "id": trade.get("orderId") or trade.get("timestamp"),
+                    "state": "filled",
+                    "side": str(trade.get("side", "buy")).lower() if trade.get("side") else "buy",
+                    "created_at": trade.get("timestamp"),
+                    "executions": [
+                        {
+                            "quantity": trade.get("qty"),
+                            "effective_price": trade.get("entry_price"),
+                        }
+                    ],
+                }
+            )
+        return {"results": results}
 
-            for order in buy_orders:
-                for execution in order.get("executions", []):
-                    quantity = float(execution["quantity"])
-                    price = float(execution["effective_price"])
-
-                    if remaining_quantity <= 0:
-                        break
-
-                    # Use only the portion of the quantity needed to match the current holdings
-                    if quantity > remaining_quantity:
-                        total_cost += remaining_quantity * price
-                        remaining_quantity = 0
-                    else:
-                        total_cost += quantity * price
-                        remaining_quantity -= quantity
-
-                if remaining_quantity <= 0:
-                    break
-
-            if current_quantities[asset_code] > 0:
-                cost_basis[asset_code] = total_cost / current_quantities[asset_code]
-            else:
-                cost_basis[asset_code] = 0.0
-
+    def calculate_cost_basis(self):
+        balance = exchange_get_balance() or {}
+        cost_basis = {}
+        for symbol, pos in (balance.get("positions") or {}).items():
+            qty = float((pos or {}).get("qty", 0.0) or 0.0)
+            entry_price = float((pos or {}).get("entry_price", 0.0) or 0.0)
+            if qty > 0:
+                cost_basis[str(symbol).split("-")[0]] = entry_price
         return cost_basis
 
     def get_price(self, symbols: list) -> Dict[str, float]:
@@ -1218,13 +1264,15 @@ class CryptoAPITrading:
             if symbol == "USDC-USD":
                 continue
 
-            path = f"/api/v1/crypto/marketdata/best_bid_ask/?symbol={symbol}"
-            response = self.make_api_request("GET", path)
-
-            if response and "results" in response:
-                result = response["results"][0]
-                ask = float(result["ask_inclusive_of_buy_spread"])
-                bid = float(result["bid_inclusive_of_sell_spread"])
+            lookup = symbol
+            if lookup.endswith("-USD"):
+                lookup = lookup[:-4]
+            if lookup.endswith("-USDT"):
+                lookup = lookup[:-5]
+            ask = exchange_get_current_price(lookup)
+            if ask is not None:
+                ask = float(ask)
+                bid = float(ask)
 
                 buy_prices[symbol] = ask
                 sell_prices[symbol] = bid
@@ -1236,7 +1284,6 @@ class CryptoAPITrading:
                 except Exception:
                     pass
             else:
-                # Fallback to cached bid/ask so account value never drops due to a transient miss
                 cached = None
                 try:
                     cached = self._last_good_bid_ask.get(symbol)
@@ -1269,6 +1316,55 @@ class CryptoAPITrading:
         current_buy_prices, current_sell_prices, valid_symbols = self.get_price([symbol])
         current_price = current_buy_prices[symbol]
         asset_quantity = amount_in_usd / current_price
+        asset_quantity = amount_in_usd / current_price
+
+        # If exchange adapter is initialized and indicates SIMULATOR or KUCOIN_REAL, use it
+        try:
+            mode = get_exchange_mode()
+        except Exception:
+            mode = None
+
+        if mode in ("SIMULATOR", "KUCOIN_REAL"):
+            # Use adapter to place the buy immediately and record the trade locally
+            buying_power_before = self._get_buying_power()
+            base_sym = symbol.split("-")[0] if "-" in symbol else symbol
+            try:
+                result = exchange_buy(base_sym, asset_quantity)
+            except Exception as e:
+                return None
+
+            if result and result.get("success"):
+                order_id = result.get("orderId")
+                price = result.get("price")
+                # attempt to get updated buying power from adapter
+                try:
+                    bal = exchange_get_balance() or {}
+                    buying_power_after = float(bal.get("usdt", buying_power_before))
+                except Exception:
+                    buying_power_after = self._get_buying_power()
+
+                # Record trade for GUI/history
+                try:
+                    self._record_trade(
+                        side="buy",
+                        symbol=symbol,
+                        qty=float(asset_quantity),
+                        price=float(price) if price is not None else None,
+                        avg_cost_basis=float(avg_cost_basis) if avg_cost_basis is not None else None,
+                        pnl_pct=float(pnl_pct) if pnl_pct is not None else None,
+                        tag=tag,
+                        order_id=order_id,
+                        buying_power_before=buying_power_before,
+                        buying_power_after=buying_power_after,
+                        buying_power_delta=(float(buying_power_after) - float(buying_power_before)),
+                    )
+                except Exception:
+                    pass
+
+                # Return a minimal successful response (no 'errors' key)
+                return {"id": order_id, "status": "filled"}
+            else:
+                return None
 
         max_retries = 5
         retries = 0
@@ -1391,6 +1487,52 @@ class CryptoAPITrading:
         pnl_pct: Optional[float] = None,
         tag: Optional[str] = None,
     ) -> Any:
+        # If exchange adapter is active, use it to perform the sell and record trade
+        try:
+            mode = get_exchange_mode()
+        except Exception:
+            mode = None
+
+        if mode in ("SIMULATOR", "KUCOIN_REAL"):
+            buying_power_before = self._get_buying_power()
+            base_sym = symbol.split("-")[0] if "-" in symbol else symbol
+            try:
+                result = exchange_sell(base_sym, asset_quantity)
+            except Exception:
+                return None
+
+            if result and result.get("success"):
+                order_id = result.get("orderId")
+                price = result.get("price")
+                try:
+                    bal = exchange_get_balance() or {}
+                    buying_power_after = float(bal.get("usdt", buying_power_before))
+                except Exception:
+                    buying_power_after = self._get_buying_power()
+
+                # Record sell trade
+                try:
+                    self._record_trade(
+                        side="sell",
+                        symbol=symbol,
+                        qty=float(asset_quantity),
+                        price=float(price) if price is not None else None,
+                        avg_cost_basis=float(avg_cost_basis) if avg_cost_basis is not None else None,
+                        pnl_pct=float(pnl_pct) if pnl_pct is not None else None,
+                        tag=tag,
+                        order_id=order_id,
+                        fees_usd=None,
+                        buying_power_before=buying_power_before,
+                        buying_power_after=buying_power_after,
+                        buying_power_delta=(float(buying_power_after) - float(buying_power_before)),
+                    )
+                except Exception:
+                    pass
+
+                return {"id": order_id, "status": "filled"}
+            else:
+                return None
+
         body = {
             "client_order_id": client_order_id,
             "side": side,
@@ -1670,7 +1812,15 @@ class CryptoAPITrading:
                 "percent_in_trade": float(in_use),
             }
 
-        os.system('cls' if os.name == 'nt' else 'clear')
+        # Avoid shelling out to `clear` in the container; it spams TERM warnings
+        # when the process is not attached to an interactive terminal.
+        try:
+            if os.name == 'nt':
+                os.system('cls')
+            elif os.environ.get('TERM'):
+                os.system('clear')
+        except Exception:
+            pass
         print("\n--- Account Summary ---")
         print(f"Total Account Value: ${total_account_value:.2f}")
         print(f"Holdings Value: ${holdings_sell_value:.2f}")

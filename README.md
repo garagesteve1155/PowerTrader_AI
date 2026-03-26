@@ -47,7 +47,7 @@ For determining when to sell, the bot uses a trailing profit margin to maximize 
 
 THESE INSTRUCTIONS WERE WRITTEN BY AI! PLEASE LET ME KNOW IF THERE ARE ANY ERRORS OR ISSUES WITH THIS SETUP PROCESS!
 
-If you have any crypto holdings in Robinhood currently, either transfer them out of your Robinhood account or sell them to dollars BEFORE going through this setup process!
+If you have any crypto holdings in another exchange account you plan to repurpose, transfer them out or close them BEFORE going through this setup process.
 
 This page walks you through installing PowerTrader AI from start to finish, in the exact order a first-time user should do it.  
 No coding knowledge needed.  
@@ -105,7 +105,7 @@ This is the only thing you need to run day-to-day.
 
 ---
 
-## Step 5 — Set your folder, coins, and Robinhood keys (inside the Hub)
+## Step 5 — Set your folder, coins, and KuCoin credentials (inside the Hub)
 
 ### Open Settings
 
@@ -113,23 +113,24 @@ In the Hub, open **Settings** and do this in order:
 
 - **Main Neural Folder**: set this to the same folder that contains `pt_hub.py` (recommended easiest).
 - **Choose which coins to trade**: start with **BTC**.
-- **While you are still in Settings**, click **Robinhood API Setup** and do this:
+- **KuCoin API Setup**: create a local `.env` file from `.env.example`, or set `KUCOIN_API_KEY`, `KUCOIN_API_SECRET`, and `KUCOIN_API_PASSPHRASE` as environment variables.
+- Keep the API key, secret, and passphrase private. Do not commit your local `.env`.
 
-1. Click **Generate Keys**.
-2. Copy the **Public Key** shown in the wizard.
-3. On Robinhood, add a new API key and paste that Public Key.
-4. Set permissions to allow trading (the wizard tells you what to select).
-5. Robinhood will show your API Key (often starts with `rh`). Copy it.
-6. Paste the API Key back into the wizard and click **Save**.
-7. Close the wizard and go back to the **Settings** screen.
-8. **NOW** click **Save** in Settings.
+Recommended `.env` format:
 
-After saving, you will have two files in your PowerTrader AI folder:  
-`r_key.txt` and `r_secret.txt`  
-Keep them private.
+```ini
+KUCOIN_API_KEY=your_key_here
+KUCOIN_API_SECRET=your_secret_here
+KUCOIN_API_PASSPHRASE=your_passphrase_here
+PAPER_TRADING_ONLY=false
+POWERTRADER_EXECUTION_MODE=live
+EXCHANGE_MODE=KUCOIN_REAL
+```
 
 PowerTrader AI uses a simple folder style:  
 **BTC uses the main folder**, and other coins use their own subfolders (like `ETH\`).
+
+If you want paper trading, set `PAPER_TRADING_ONLY=true` and `POWERTRADER_EXECUTION_MODE=paper` in your local `.env`.
 
 ---
 
@@ -151,6 +152,39 @@ When all coins have completed training, click:
 The Hub will:  
 **start pt_thinker.py**, wait until it is ready, then it will **start pt_trader.py**.  
 You don’t need to manually start separate programs. The hub handles everything!
+
+The hub also watches `gui_settings.json`; the checked-in default enables auto-start so the stack comes up by itself after training is complete.
+
+---
+
+## Docker
+
+Quick commands to build and run using Docker:
+
+Build the image:
+
+```bash
+docker build -t powertrader_ai:latest .
+```
+
+Run the container (interactive):
+
+```bash
+docker run --rm -it powertrader_ai:latest
+```
+
+Use Docker Compose for development (bind-mounts current folder into container):
+
+```bash
+docker compose up --build
+```
+
+Notes:
+- The compose stack runs the hub and runner in separate containers. The trader is launched by the hub as a subprocess on the VNC display.
+- The hub uses a virtual display for the GUI/VNC session, so local VNC startup is handled automatically by `start.sh`.
+- The default entrypoint is `python pt_hub.py`. Override by passing a different command to `docker run` or in `docker-compose.yml`.
+- For production, consider removing the bind-mount in `docker-compose.yml` and running without volume mounts.
+
 
 ---
 
