@@ -1,3 +1,9 @@
+# This fork is only to explore if the training process is working as expected
+
+Please read the debug notes here [debug_original_pt_trainer_notes.md](./debug_original_pt_trainer_notes.md).
+
+The original README.md is below:
+
 # PowerTrader_AI
 Fully automated crypto trading powered by a custom price prediction AI and a structured/tiered DCA system.
 

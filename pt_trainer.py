@@ -272,6 +272,8 @@ try:
 except Exception:
 	pass
 
+# Enabling DEBUG_PTTRAINER will print a couple of extra lines of debug during training to illustrate a potential issue.
+DEBUG_PT_TRAINER = True
 
 the_big_index = 0
 while True:
@@ -371,6 +373,10 @@ while True:
 	else:
 		timeframe = tf_list[2]#droplet setting (create list for all timeframes)
 		timeframe_minutes = minutes_list[2]#droplet setting (create list for all timeframe_minutes)
+
+	# Print out the timeframe being selected for training
+	print(f"[DEBUG] Coin {coin_choice}: Training timeframe {timeframe}, restart count: {restarted_yet}")
+
 	start_time = int(time.time())
 	restarting = 'no'
 	success_rate = 85
@@ -1269,6 +1275,12 @@ while True:
 									which_candle_of_the_prediction_index += 1
 									try:
 										if len(price_list2)>=int(len(price_list)*0.25) and restarted_yet < 2:
+
+											# Print debug to indicate % of prices processed
+											# Given the if statement above, this will trigger three times
+											debug_pct_complete = round((price_list_index / len(price_list)) * 100.0, 1)
+											print(f"[DEBUG] Coin {coin_choice}: {debug_pct_complete}% of {len(price_list)} prices for timeframe {timeframe} have been processed. Restarting.")
+
 											restarted_yet += 1
 											restarting = 'yes'
 											break
@@ -1277,6 +1289,10 @@ while True:
 									except:
 										restarting = 'no'
 									if len(price_list2) == len(price_list):
+
+										# Print debug
+										print(f"[DEBUG] Coin {coin_choice}: 100% of {len(price_list)} prices for timeframe {timeframe} have been processed. Saving training status then exiting.")
+
 										the_big_index += 1
 										restarted_yet = 0
 										print('restarting')
