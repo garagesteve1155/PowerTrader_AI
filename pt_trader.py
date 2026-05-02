@@ -5,16 +5,15 @@ import uuid
 import time
 import math
 import shutil
+import hmac
+import hashlib
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, Optional
 import requests
-from nacl.signing import SigningKey
 import os
 import colorama
 from colorama import Fore, Style
 import traceback
-from cryptography.hazmat.primitives.asymmetric import ed25519
-from cryptography.hazmat.primitives import serialization
 
 
 
@@ -435,23 +434,23 @@ def _refresh_paths_and_symbols():
 
 #API STUFF
 API_KEY = ""
-BASE64_PRIVATE_KEY = ""
+API_SECRET = ""
 
 try:
-    with open('r_key.txt', 'r', encoding='utf-8') as f:
+    with open('cb_key.txt', 'r', encoding='utf-8') as f:
         API_KEY = (f.read() or "").strip()
-    with open('r_secret.txt', 'r', encoding='utf-8') as f:
-        BASE64_PRIVATE_KEY = (f.read() or "").strip()
+    with open('cb_secret.txt', 'r', encoding='utf-8') as f:
+        API_SECRET = (f.read() or "").strip()
 except Exception:
     API_KEY = ""
-    BASE64_PRIVATE_KEY = ""
+    API_SECRET = ""
 
-if not API_KEY or not BASE64_PRIVATE_KEY:
+if not API_KEY or not API_SECRET:
     print(
-        "\n[PowerTrader] Robinhood API credentials not found.\n"
-        "Open the GUI and go to Settings → Robinhood API → Setup / Update.\n"
-        "That wizard will generate your keypair, tell you where to paste the public key on Robinhood,\n"
-        "and will save r_key.txt + r_secret.txt so this trader can authenticate.\n"
+        "\n[PowerTrader] Coinbase API credentials not found.\n"
+        "Open the GUI and go to Settings → Coinbase API → Setup / Update.\n"
+        "That wizard will help you create your API key, and will save cb_key.txt + cb_secret.txt\n"
+        "so this trader can authenticate.\n"
     )
     raise SystemExit(1)
 
@@ -461,9 +460,8 @@ class CryptoAPITrading:
         self.path_map = dict(base_paths)
 
         self.api_key = API_KEY
-        private_key_seed = base64.b64decode(BASE64_PRIVATE_KEY)
-        self.private_key = SigningKey(private_key_seed)
-        self.base_url = "https://trading.robinhood.com"
+        self.api_secret = API_SECRET
+        self.base_url = "https://api.coinbase.com"
 
         self.dca_levels_triggered = {}  # Track DCA levels for each crypto
         self.dca_levels = list(DCA_LEVELS)  # Hard DCA triggers (percent PnL)
@@ -1370,47 +1368,41 @@ class CryptoAPITrading:
         return None
 
     def _extract_fill_from_order(self, order: dict) -> tuple:
-        """Returns (filled_qty, avg_fill_price). avg_fill_price may be None."""
+        """Returns (filled_qty, avg_fill_price). avg_fill_price may be None.
+        
+        Coinbase provides filled_size and average_filled_price in the order response.
+        """
         try:
-            execs = order.get("executions", []) or []
-            total_qty = 0.0
-            total_notional = 0.0
-            for ex in execs:
-                try:
-                    q = float(ex.get("quantity", 0.0) or 0.0)
-                    p = float(ex.get("effective_price", 0.0) or 0.0)
-                    if q > 0.0 and p > 0.0:
-                        total_qty += q
-                        total_notional += (q * p)
-                except Exception:
-                    continue
+            # Try Coinbase's format first
+            filled_qty = float(order.get("filled_size") or 0.0)
+            avg_fill_price = float(order.get("average_filled_price") or 0.0)
+            
+            if filled_qty > 0.0 and avg_fill_price > 0.0:
+                return filled_qty, avg_fill_price
+            
+            # Fallback to other possible fields
+            for qty_key in ("filled_size", "filled_asset_quantity", "filled_quantity", "size"):
+                if qty_key in order:
+                    try:
+                        qty = float(order.get(qty_key) or 0.0)
+                        if qty > 0.0:
+                            filled_qty = qty
+                            break
+                    except Exception:
+                        continue
 
-            avg_price = (total_notional / total_qty) if (total_qty > 0.0 and total_notional > 0.0) else None
+            # Try to get average price from various fields
+            for price_key in ("average_filled_price", "average_price", "price"):
+                if price_key in order:
+                    try:
+                        price = float(order.get(price_key) or 0.0)
+                        if price > 0.0:
+                            avg_fill_price = price
+                            break
+                    except Exception:
+                        continue
 
-            # Fallbacks if executions are not populated yet
-            if total_qty <= 0.0:
-                for k in ("filled_asset_quantity", "filled_quantity", "asset_quantity", "quantity"):
-                    if k in order:
-                        try:
-                            v = float(order.get(k) or 0.0)
-                            if v > 0.0:
-                                total_qty = v
-                                break
-                        except Exception:
-                            continue
-
-            if avg_price is None:
-                for k in ("average_price", "avg_price", "price", "effective_price"):
-                    if k in order:
-                        try:
-                            v = float(order.get(k) or 0.0)
-                            if v > 0.0:
-                                avg_price = v
-                                break
-                        except Exception:
-                            continue
-
-            return float(total_qty), (float(avg_price) if avg_price is not None else None)
+            return float(filled_qty), (float(avg_fill_price) if avg_fill_price > 0.0 else None)
         except Exception:
             return 0.0, None
 
@@ -1418,18 +1410,9 @@ class CryptoAPITrading:
         """
         Returns (filled_qty, avg_fill_price, notional_usd, fees_usd).
 
-        FIX:
-        Your P&L mismatch comes from deriving USD notional by summing executions
-        (quantity * effective_price). That often differs by 1–2 cents from the USD
-        Robinhood uses in the app and in actual account balance changes.
-
-        Source of truth for the app/accounting is the order-level fill summary:
-          - average_price
-          - filled_asset_quantity
-
-        We compute:
-          notional_usd = round_to_cents(average_price * filled_asset_quantity)
-        and only fall back to executions if the order-level fields are missing.
+        Coinbase provides fills/fees via:
+          - filled_size and average_filled_price in the order
+          - total_fees in the order
         """
 
         def _fee_to_float(v: Any) -> float:
@@ -1443,7 +1426,7 @@ class CryptoAPITrading:
                 if isinstance(v, list):
                     return float(sum(_fee_to_float(x) for x in v))
                 if isinstance(v, dict):
-                    for k in ("usd_amount", "amount", "value", "fee", "quantity"):
+                    for k in ("amount", "value", "fee"):
                         if k in v:
                             try:
                                 return float(v[k])
@@ -1466,30 +1449,23 @@ class CryptoAPITrading:
             return d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         try:
-            # ----- fees (unchanged logic) -----
-            execs = order.get("executions", []) or []
+            # ----- fees (Coinbase provides total_fees) -----
             fee_total = 0.0
-            fee_found = False
-
-            for ex in execs:
-                try:
-                    for fk in ("fee", "fees", "fee_amount", "fee_usd", "fee_in_usd"):
-                        if fk in ex:
-                            fee_found = True
-                            fee_total += _fee_to_float(ex.get(fk))
-                except Exception:
-                    continue
-
-            for fk in ("fee", "fees", "fee_amount", "fee_usd", "fee_in_usd"):
+            
+            # Try Coinbase's total_fees field
+            if "total_fees" in order:
+                fee_total += _fee_to_float(order.get("total_fees"))
+            
+            # Try other common fee fields
+            for fk in ("fee", "fees"):
                 if fk in order:
-                    fee_found = True
                     fee_total += _fee_to_float(order.get(fk))
 
-            fees_usd = float(fee_total) if fee_found else None
+            fees_usd = float(fee_total) if fee_total > 0 else None
 
-            # ----- filled qty + avg price (prefer order-level fields) -----
-            avg_p_raw = order.get("average_price", None)
-            filled_q_raw = order.get("filled_asset_quantity", None)
+            # ----- filled qty + avg price (Coinbase uses filled_size) -----
+            avg_p_raw = order.get("average_filled_price", None)
+            filled_q_raw = order.get("filled_size", None)
 
             avg_p_d = _to_decimal(avg_p_raw)
             filled_q_d = _to_decimal(filled_q_raw)
@@ -1502,32 +1478,6 @@ class CryptoAPITrading:
             # ----- USD notional (SOURCE OF TRUTH) -----
             if avg_p_d > 0 and filled_q_d > 0:
                 notional_usd = float(_usd_cents(avg_p_d * filled_q_d))
-
-            # ----- fallback only if order-level fields missing -----
-            if notional_usd is None:
-                total_notional_d = Decimal("0")
-                total_qty_d = Decimal("0")
-                for ex in execs:
-                    try:
-                        q_d = _to_decimal(ex.get("quantity", None))
-                        p_d = _to_decimal(ex.get("effective_price", None))
-                        if q_d > 0 and p_d > 0:
-                            total_qty_d += q_d
-                            total_notional_d += (q_d * p_d)
-                    except Exception:
-                        continue
-
-                if total_qty_d > 0 and avg_fill_price is None:
-                    try:
-                        avg_fill_price = float(total_notional_d / total_qty_d)
-                    except Exception:
-                        pass
-
-                if total_notional_d > 0:
-                    notional_usd = float(_usd_cents(total_notional_d))
-
-                if filled_qty <= 0.0 and total_qty_d > 0:
-                    filled_qty = float(total_qty_d)
 
             return float(filled_qty), (float(avg_fill_price) if avg_fill_price is not None else None), notional_usd, fees_usd
 
@@ -2183,7 +2133,7 @@ class CryptoAPITrading:
 
     def make_api_request(self, method: str, path: str, body: Optional[str] = "") -> Any:
 
-        timestamp = self._get_current_timestamp()
+        timestamp = str(int(time.time()))
         headers = self.get_authorization_header(method, path, body, timestamp)
         url = self.base_url + path
 
@@ -2191,7 +2141,7 @@ class CryptoAPITrading:
             if method == "GET":
                 response = requests.get(url, headers=headers, timeout=10)
             elif method == "POST":
-                response = requests.post(url, headers=headers, json=json.loads(body), timeout=10)
+                response = requests.post(url, headers=headers, data=body, timeout=10)
 
             response.raise_for_status()
             return response.json()
@@ -2206,33 +2156,42 @@ class CryptoAPITrading:
             return None
 
     def get_authorization_header(
-            self, method: str, path: str, body: str, timestamp: int
+            self, method: str, path: str, body: str, timestamp: str
     ) -> Dict[str, str]:
-        message_to_sign = f"{self.api_key}{timestamp}{path}{method}{body}"
-        signed = self.private_key.sign(message_to_sign.encode("utf-8"))
+        """Generate Coinbase API authorization headers using HMAC SHA256."""
+        message = f"{timestamp}{method}{path}{body}"
+        signature = hmac.new(
+            self.api_secret.encode('utf-8'),
+            message.encode('utf-8'),
+            hashlib.sha256
+        ).digest()
+        signature_b64 = base64.b64encode(signature).decode('utf-8')
 
         return {
-            "x-api-key": self.api_key,
-            "x-signature": base64.b64encode(signed.signature).decode("utf-8"),
-            "x-timestamp": str(timestamp),
+            "CB-ACCESS-KEY": self.api_key,
+            "CB-ACCESS-SIGN": signature_b64,
+            "CB-ACCESS-TIMESTAMP": timestamp,
+            "Content-Type": "application/json",
         }
 
     def get_account(self) -> Any:
-        path = "/api/v1/crypto/trading/accounts/"
+        path = "/api/v3/brokerage/accounts"
         return self.make_api_request("GET", path)
 
     def get_holdings(self) -> Any:
-        path = "/api/v1/crypto/trading/holdings/"
+        """Get holdings from Coinbase accounts endpoint."""
+        path = "/api/v3/brokerage/accounts"
         return self.make_api_request("GET", path)
 
     def get_trading_pairs(self) -> Any:
-        path = "/api/v1/crypto/trading/trading_pairs/"
+        """Get available trading products from Coinbase."""
+        path = "/api/v3/brokerage/products"
         response = self.make_api_request("GET", path)
 
-        if not response or "results" not in response:
+        if not response or "products" not in response:
             return []
 
-        trading_pairs = response.get("results", [])
+        trading_pairs = response.get("products", [])
         if not trading_pairs:
             return []
 
@@ -2242,56 +2201,41 @@ class CryptoAPITrading:
         """Fetch crypto orders for a symbol, following pagination so older bot buys
         (which may be on earlier pages) are included.
 
-        Robinhood's orders endpoint is paginated. If we only read the first page,
-        a newer manual SELL can push earlier bot BUYs off page 1, which then breaks
-        cost-basis reconstruction. This method returns a single dict with an
-        aggregated "results" list.
+        Coinbase's orders endpoint is paginated. This method returns a dict with an
+        aggregated "orders" list.
         """
-        path = f"/api/v1/crypto/trading/orders/?symbol={symbol}"
+        path = f"/api/v3/brokerage/orders/historical/batch?product_id={symbol}-USD&limit=100"
         first = self.make_api_request("GET", path)
 
         # If the API didn't return the expected shape, keep legacy behavior.
         if not isinstance(first, dict):
             return first
 
-        results = list(first.get("results", []) or [])
-        next_url = first.get("next", None)
+        orders = list(first.get("orders", []) or [])
+        pagination = first.get("pagination", {})
+        next_cursor = pagination.get("next_cursor", None) if pagination else None
 
         # Follow pagination links (best-effort, capped).
         pages = 1
-        while next_url and pages < int(max_pages):
+        while next_cursor and pages < int(max_pages):
             try:
-                nxt = str(next_url).strip()
-                if not nxt:
+                if not next_cursor:
                     break
 
-                # Convert absolute URL -> relative path expected by make_api_request().
-                if nxt.startswith(self.base_url):
-                    nxt_path = nxt[len(self.base_url):]
-                elif nxt.startswith("/"):
-                    nxt_path = nxt
-                elif "://" in nxt:
-                    # Fallback: strip scheme+host
-                    try:
-                        nxt_path = "/" + nxt.split("://", 1)[1].split("/", 1)[1]
-                    except Exception:
-                        break
-                else:
-                    nxt_path = "/" + nxt
-
-                resp = self.make_api_request("GET", nxt_path)
+                path = f"/api/v3/brokerage/orders/historical/batch?product_id={symbol}-USD&limit=100&after={next_cursor}"
+                resp = self.make_api_request("GET", path)
                 if not isinstance(resp, dict):
                     break
 
-                results.extend(list(resp.get("results", []) or []))
-                next_url = resp.get("next", None)
+                orders.extend(list(resp.get("orders", []) or []))
+                pagination = resp.get("pagination", {})
+                next_cursor = pagination.get("next_cursor", None) if pagination else None
                 pages += 1
             except Exception:
                 break
 
         out = dict(first)
-        out["results"] = results
-        out["next"] = None
+        out["orders"] = orders
         return out
 
 
@@ -2488,6 +2432,10 @@ class CryptoAPITrading:
         return cost_basis
 
     def get_price(self, symbols: list) -> Dict[str, float]:
+        """Get current bid/ask prices from Coinbase.
+        
+        Coinbase product IDs are formatted as BTC-USD, ETH-USD, etc.
+        """
         buy_prices = {}
         sell_prices = {}
         valid_symbols = []
@@ -2496,21 +2444,26 @@ class CryptoAPITrading:
             if symbol == "USDC-USD":
                 continue
 
-            path = f"/api/v1/crypto/marketdata/best_bid_ask/?symbol={symbol}"
+            # Format product ID for Coinbase (symbol-USD)
+            product_id = f"{symbol}-USD" if "-USD" not in symbol else symbol
+
+            path = f"/api/v3/brokerage/products/{product_id}"
             response = self.make_api_request("GET", path)
 
-            if response and "results" in response:
-                result = response["results"][0]
-                ask = float(result["ask_inclusive_of_buy_spread"])
-                bid = float(result["bid_inclusive_of_sell_spread"])
-
-                buy_prices[symbol] = ask
-                sell_prices[symbol] = bid
-                valid_symbols.append(symbol)
-
-                # Update cache for transient failures later
+            if response and "bid" in response and "ask" in response:
                 try:
-                    self._last_good_bid_ask[symbol] = {"ask": ask, "bid": bid, "ts": time.time()}
+                    ask = float(response["ask"])
+                    bid = float(response["bid"])
+
+                    buy_prices[symbol] = ask
+                    sell_prices[symbol] = bid
+                    valid_symbols.append(symbol)
+
+                    # Update cache for transient failures later
+                    try:
+                        self._last_good_bid_ask[symbol] = {"ask": ask, "bid": bid, "ts": time.time()}
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             else:
@@ -2543,39 +2496,48 @@ class CryptoAPITrading:
         pnl_pct: Optional[float] = None,
         tag: Optional[str] = None,
     ) -> Any:
+        """Place a buy order on Coinbase."""
         # Fetch the current price of the asset (for sizing only)
         current_buy_prices, current_sell_prices, valid_symbols = self.get_price([symbol])
+        if symbol not in current_buy_prices:
+            return None
+            
         current_price = current_buy_prices[symbol]
         asset_quantity = amount_in_usd / current_price
 
-        max_retries = 5
+        max_retries = 3
         retries = 0
 
         while retries < max_retries:
             retries += 1
             response = None
             try:
-                # Default precision to 8 decimals initially
+                # Format product ID for Coinbase
+                product_id = f"{symbol}-USD" if "-USD" not in symbol else symbol
+                
+                # Round to reasonable precision (8 decimals)
                 rounded_quantity = round(asset_quantity, 8)
 
+                # Coinbase order format
                 body = {
                     "client_order_id": client_order_id,
-                    "side": side,
-                    "type": order_type,
-                    "symbol": symbol,
-                    "market_order_config": {
-                        "asset_quantity": f"{rounded_quantity:.8f}"  # Start with 8 decimal places
+                    "product_id": product_id,
+                    "side": side.lower(),
+                    "order_configuration": {
+                        "market_market_ious": {
+                            "quote_size": str(amount_in_usd)
+                        }
                     }
                 }
 
-                path = "/api/v1/crypto/trading/orders/"
+                path = "/api/v3/brokerage/orders"
 
                 response = self.make_api_request("POST", path, json.dumps(body))
-                if response and "errors" not in response:
-                    order_id = response.get("id", None)
+                
+                if response and "error_response" not in response and "order_id" in response:
+                    order_id = response.get("order_id", None)
 
                     # Persist minimal metadata so restarts can reconcile precisely
-                    # (cost/proceeds are derived from order executions, NOT buying power deltas).
                     try:
                         if order_id:
                             self._pnl_ledger.setdefault("pending_orders", {})
@@ -2591,11 +2553,12 @@ class CryptoAPITrading:
                     except Exception:
                         pass
 
-                    # Wait until the order is terminal, then compute amounts/fees from executions
+                    # Wait until the order is terminal
                     if order_id:
                         order = self._wait_for_order_terminal(symbol, order_id)
-                        state = str(order.get("state", "")).lower().strip() if isinstance(order, dict) else ""
-                        if state != "filled":
+                        state = str(order.get("status", "")).lower().strip() if isinstance(order, dict) else ""
+                        
+                        if state not in ("filled", "done"):
                             # Not filled -> clear pending and do not record a trade
                             try:
                                 self._pnl_ledger.get("pending_orders", {}).pop(order_id, None)
@@ -2604,7 +2567,7 @@ class CryptoAPITrading:
                                 pass
                             return None
 
-                        # --- DEBUG DUMP (order fill + order history + executions) ---
+                        # --- DEBUG DUMP ---
                         try:
                             debug_dir = os.path.join(HUB_DATA_DIR, "debug_trade_dumps")
                             os.makedirs(debug_dir, exist_ok=True)
@@ -2617,17 +2580,12 @@ class CryptoAPITrading:
 
                             with open(debug_path, "w", encoding="utf-8") as f:
                                 f.write(json.dumps(order, indent=2))
-                                f.write("\n\n")
-                                f.write(json.dumps(self.get_orders(symbol), indent=2))
-                                f.write("\n\n")
-                                f.write(json.dumps(order.get("executions", []), indent=2))
                         except Exception:
                             pass
-                        # --- END DEBUG DUMP ---
 
                         filled_qty, avg_fill_price, notional_usd, fees_usd = self._extract_amounts_and_fees_from_order(order)
 
-                        # Record for GUI history (ACTUAL fill from order executions)
+                        # Record for GUI history
                         self._record_trade(
                             side="buy",
                             symbol=symbol,
@@ -2641,18 +2599,14 @@ class CryptoAPITrading:
                             order_id=order_id,
                         )
 
-                        # This filled BUY now belongs to the bot's CURRENT trade for this coin.
-                        # Persist the order id immediately so restarts/order-selection recovery
-                        # have the correct current-trade anchor.
+                        # Mark as bot order
                         try:
                             base_symbol = str(symbol).upper().split("-")[0].strip()
                             self._mark_bot_order_id(base_symbol, order_id)
                         except Exception:
                             pass
 
-                        # Maintain DCA stage in memory during normal runtime.
-                        # Fresh initial trade buy -> stage 0
-                        # Actual DCA fill       -> increment by one
+                        # Maintain DCA stage
                         try:
                             base_symbol = str(symbol).upper().split("-")[0].strip()
                             if str(tag or "").upper().strip() == "DCA":
@@ -2664,36 +2618,19 @@ class CryptoAPITrading:
                         except Exception:
                             pass
 
-                        # Clear pending now that it is recorded
+                        # Clear pending
                         try:
                             self._pnl_ledger.get("pending_orders", {}).pop(order_id, None)
                             self._save_pnl_ledger()
                         except Exception:
                             pass
 
-                    return response  # Successfully placed (and fully filled) order
+                    return response
 
             except Exception:
-                pass #print(traceback.format_exc())
-
-            # Check for precision errors
-            if response and "errors" in response:
-                for error in response["errors"]:
-                    if "has too much precision" in error.get("detail", ""):
-                        # Extract required precision directly from the error message
-                        detail = error["detail"]
-                        nearest_value = detail.split("nearest ")[1].split(" ")[0]
-
-                        decimal_places = len(nearest_value.split(".")[1].rstrip("0"))
-                        asset_quantity = round(asset_quantity, decimal_places)
-                        break
-                    elif "must be greater than or equal to" in error.get("detail", ""):
-                        return None
+                pass
 
         return None
-
-
-
 
     def place_sell_order(
         self,
@@ -2707,25 +2644,29 @@ class CryptoAPITrading:
         pnl_pct: Optional[float] = None,
         tag: Optional[str] = None,
     ) -> Any:
+        """Place a sell order on Coinbase."""
+        # Format product ID for Coinbase
+        product_id = f"{symbol}-USD" if "-USD" not in symbol else symbol
+        
         body = {
             "client_order_id": client_order_id,
-            "side": side,
-            "type": order_type,
-            "symbol": symbol,
-            "market_order_config": {
-                "asset_quantity": f"{asset_quantity:.8f}"
+            "product_id": product_id,
+            "side": side.lower(),
+            "order_configuration": {
+                "market_market_ious": {
+                    "base_size": str(asset_quantity)
+                }
             }
         }
 
-        path = "/api/v1/crypto/trading/orders/"
+        path = "/api/v3/brokerage/orders"
 
         response = self.make_api_request("POST", path, json.dumps(body))
 
-        if response and isinstance(response, dict) and "errors" not in response:
-            order_id = response.get("id", None)
+        if response and isinstance(response, dict) and "error_response" not in response and "order_id" in response:
+            order_id = response.get("order_id", None)
 
-            # Persist minimal metadata so restarts can reconcile precisely
-            # (cost/proceeds are derived from order executions, NOT buying power deltas).
+            # Persist minimal metadata
             try:
                 if order_id:
                     self._pnl_ledger.setdefault("pending_orders", {})
@@ -2747,8 +2688,8 @@ class CryptoAPITrading:
                     if not match:
                         return response
 
-                    if str(match.get("state", "")).lower() != "filled":
-                        # Not filled -> clear pending and do not record a trade
+                    if str(match.get("status", "")).lower() not in ("filled", "done"):
+                        # Not filled -> clear pending
                         try:
                             self._pnl_ledger.get("pending_orders", {}).pop(order_id, None)
                             self._save_pnl_ledger()
@@ -2756,7 +2697,7 @@ class CryptoAPITrading:
                             pass
                         return response
 
-                    # --- DEBUG DUMP (order fill + order history + executions) ---
+                    # --- DEBUG DUMP ---
                     try:
                         debug_dir = os.path.join(HUB_DATA_DIR, "debug_trade_dumps")
                         os.makedirs(debug_dir, exist_ok=True)
@@ -2769,17 +2710,12 @@ class CryptoAPITrading:
 
                         with open(debug_path, "w", encoding="utf-8") as f:
                             f.write(json.dumps(match, indent=2))
-                            f.write("\n\n")
-                            f.write(json.dumps(self.get_orders(symbol), indent=2))
-                            f.write("\n\n")
-                            f.write(json.dumps(match.get("executions", []), indent=2))
                     except Exception:
                         pass
-                    # --- END DEBUG DUMP ---
 
                     actual_qty, actual_price, notional_usd, fees_usd = self._extract_amounts_and_fees_from_order(match)
 
-                    # If we managed to get a better fill price, update the displayed PnL% too
+                    # If we managed to get a better fill price, update the displayed PnL%
                     if avg_cost_basis is not None and actual_price is not None:
                         try:
                             acb = float(avg_cost_basis)
@@ -2787,8 +2723,6 @@ class CryptoAPITrading:
                                 pnl_pct = ((float(actual_price) - acb) / acb) * 100.0
                         except Exception:
                             pass
-
-
 
                     self._record_trade(
                         side="sell",
@@ -2803,9 +2737,7 @@ class CryptoAPITrading:
                         order_id=order_id,
                     )
 
-                    # Filled sell = current trade is over for this coin.
-                    # Clear tracked current-trade order ids and reset DCA/trailing state now,
-                    # instead of letting stale state leak into the next trade.
+                    # Filled sell = current trade is over
                     try:
                         base_symbol = str(symbol).upper().split("-")[0].strip()
                         self._clear_bot_order_ids_for_coin(base_symbol)
@@ -2814,7 +2746,7 @@ class CryptoAPITrading:
                     except Exception:
                         pass
 
-                    # Clear pending now that it is recorded
+                    # Clear pending
                     try:
                         if order_id:
                             self._pnl_ledger.get("pending_orders", {}).pop(order_id, None)
@@ -2822,7 +2754,7 @@ class CryptoAPITrading:
                     except Exception:
                         pass
             except Exception:
-                pass #print(traceback.format_exc())
+                pass
 
         return response
 

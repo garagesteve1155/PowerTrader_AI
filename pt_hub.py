@@ -3602,70 +3602,60 @@ class PowerTraderHub(tk.Tk):
 
 
     def _rh_load_api_creds(self) -> Optional[tuple]:
-        """Read r_key.txt + r_secret.txt (saved by the Setup Wizard)."""
+        """Read cb_key.txt + cb_secret.txt (saved by the Setup Wizard)."""
         try:
-            key_path = os.path.join(self.project_dir, "r_key.txt")
-            sec_path = os.path.join(self.project_dir, "r_secret.txt")
+            key_path = os.path.join(self.project_dir, "cb_key.txt")
+            sec_path = os.path.join(self.project_dir, "cb_secret.txt")
             if not os.path.isfile(key_path) or not os.path.isfile(sec_path):
                 return None
             with open(key_path, "r", encoding="utf-8") as f:
                 api_key = (f.read() or "").strip()
             with open(sec_path, "r", encoding="utf-8") as f:
-                priv_b64 = (f.read() or "").strip()
-            if not api_key or not priv_b64:
+                api_secret = (f.read() or "").strip()
+            if not api_key or not api_secret:
                 return None
-            return (api_key, priv_b64)
+            return (api_key, api_secret)
         except Exception:
             return None
 
     def _rh_make_request(self, method: str, path: str, body: str = "") -> Optional[dict]:
-        """Signed Robinhood API request (read-only for this feature)."""
+        """Signed Coinbase API request (read-only for this UI feature)."""
         try:
             import requests
+            import hmac
+            import hashlib
         except Exception:
-            requests = None
+            return None
 
         try:
             import base64
         except Exception:
-            base64 = None
-
-        try:
-            from cryptography.hazmat.primitives.asymmetric import ed25519
-        except Exception:
-            ed25519 = None
-
-        if not requests or not ed25519 or not base64:
             return None
 
         creds = self._rh_load_api_creds()
         if not creds:
             return None
-        api_key, priv_b64 = creds
+        api_key, api_secret = creds
 
         try:
-            ts = int(time.time())
-            msg = f"{api_key}{ts}{path}{method}{body}".encode("utf-8")
-
-            raw = base64.b64decode(priv_b64)
-            # Accept 32 (seed) or 64 (seed+pub) just like the wizard does
-            if len(raw) == 64:
-                seed = raw[:32]
-            elif len(raw) == 32:
-                seed = raw
-            else:
-                return None
-            pk = ed25519.Ed25519PrivateKey.from_private_bytes(seed)
-            sig_b64 = base64.b64encode(pk.sign(msg)).decode("utf-8")
+            ts = str(int(time.time()))
+            message = f"{ts}{method}{path}{body}"
+            
+            signature = hmac.new(
+                api_secret.encode('utf-8'),
+                message.encode('utf-8'),
+                hashlib.sha256
+            ).digest()
+            signature_b64 = base64.b64encode(signature).decode('utf-8')
 
             headers = {
-                "x-api-key": api_key,
-                "x-timestamp": str(ts),
-                "x-signature": sig_b64,
+                "CB-ACCESS-KEY": api_key,
+                "CB-ACCESS-SIGN": signature_b64,
+                "CB-ACCESS-TIMESTAMP": ts,
                 "Content-Type": "application/json",
             }
 
-            base_url = "https://trading.robinhood.com"
+            base_url = "https://api.coinbase.com"
             url = f"{base_url}{path}"
 
             if str(method).upper() == "GET":
@@ -3680,10 +3670,10 @@ class PowerTraderHub(tk.Tk):
             return None
 
     def _rh_get_holdings(self) -> Optional[list]:
-        data = self._rh_make_request("GET", "/api/v1/crypto/trading/holdings/")
+        data = self._rh_make_request("GET", "/api/v3/brokerage/accounts")
         if not data or not isinstance(data, dict):
             return None
-        res = data.get("results", None)
+        res = data.get("accounts", None)
         if not isinstance(res, list):
             return None
         return res
@@ -3692,10 +3682,12 @@ class PowerTraderHub(tk.Tk):
         sym = str(full_symbol).upper().strip()
         if not sym:
             return None
-        data = self._rh_make_request("GET", f"/api/v1/crypto/trading/orders/?symbol={sym}")
+        # Coinbase uses product_id format: BTC-USD, ETH-USD, etc.
+        product_id = sym if "-USD" in sym else f"{sym}-USD"
+        data = self._rh_make_request("GET", f"/api/v3/brokerage/orders/historical/batch?product_id={product_id}&limit={int(limit)}")
         if not data or not isinstance(data, dict):
             return None
-        res = data.get("results", None)
+        res = data.get("orders", None)
         if not isinstance(res, list):
             return None
         return res[: int(limit) if limit else 50]
@@ -5971,10 +5963,10 @@ class PowerTraderHub(tk.Tk):
         add_row(r, "pt_trainer.py path:", trainer_script_var); r += 1
         add_row(r, "pt_trader.py path:", trader_script_var); r += 1
 
-        # --- Robinhood API setup (writes r_key.txt + r_secret.txt used by pt_trader.py) ---
+        # --- Coinbase API setup (writes cb_key.txt + cb_secret.txt used by pt_trader.py) ---
         def _api_paths() -> Tuple[str, str]:
-            key_path = os.path.join(self.project_dir, "r_key.txt")
-            secret_path = os.path.join(self.project_dir, "r_secret.txt")
+            key_path = os.path.join(self.project_dir, "cb_key.txt")
+            secret_path = os.path.join(self.project_dir, "cb_secret.txt")
             return key_path, secret_path
 
         def _read_api_files() -> Tuple[str, str]:
@@ -5999,9 +5991,9 @@ class PowerTraderHub(tk.Tk):
 
             missing = []
             if not k:
-                missing.append("r_key.txt (API Key)")
+                missing.append("cb_key.txt (API Key)")
             if not s:
-                missing.append("r_secret.txt (PRIVATE key)")
+                missing.append("cb_secret.txt (API Secret)")
 
             if missing:
                 api_status_var.set("Not configured ❌ (missing " + ", ".join(missing) + ")")
@@ -6009,7 +6001,7 @@ class PowerTraderHub(tk.Tk):
                 api_status_var.set("Configured ✅ (credentials found)")
 
         def _open_api_folder() -> None:
-            """Open the folder where r_key.txt / r_secret.txt live."""
+            """Open the folder where cb_key.txt / cb_secret.txt live."""
             try:
                 folder = os.path.abspath(self.project_dir)
                 if os.name == "nt":
@@ -6023,7 +6015,7 @@ class PowerTraderHub(tk.Tk):
                 messagebox.showerror("Couldn't open folder", f"Tried to open:\n{self.project_dir}\n\nError:\n{e}")
 
         def _clear_api_files() -> None:
-            """Delete r_key.txt / r_secret.txt (with a big confirmation)."""
+            """Delete cb_key.txt / cb_secret.txt (with a big confirmation)."""
             key_path, secret_path = _api_paths()
             if not messagebox.askyesno(
                 "Delete API credentials?",
@@ -6045,61 +6037,31 @@ class PowerTraderHub(tk.Tk):
                 return
 
             _refresh_api_status()
-            messagebox.showinfo("Deleted", "Deleted r_key.txt and r_secret.txt.")
+            messagebox.showinfo("Deleted", "Deleted cb_key.txt and cb_secret.txt.")
 
         def _open_robinhood_api_wizard() -> None:
             """
-            Beginner-friendly wizard that creates + stores Robinhood Crypto Trading API credentials.
+            Beginner-friendly wizard for Coinbase API credentials setup.
 
             What we store:
-              - r_key.txt    = your Robinhood *API Key* (safe-ish to store, still treat as sensitive)
-              - r_secret.txt = your *PRIVATE key* (treat like a password — never share it)
+              - cb_key.txt    = your Coinbase API Key
+              - cb_secret.txt = your Coinbase API Secret (treat like a password)
             """
             import webbrowser
-            import base64
-            import platform
-            from datetime import datetime
-            import time
-
-            # Friendly dependency errors (laymen-proof)
-            try:
-                from cryptography.hazmat.primitives.asymmetric import ed25519
-                from cryptography.hazmat.primitives import serialization
-            except Exception:
-                messagebox.showerror(
-                    "Missing dependency",
-                    "The 'cryptography' package is required for Robinhood API setup.\n\n"
-                    "Fix: open a Command Prompt / Terminal in this folder and run:\n"
-                    "  pip install cryptography\n\n"
-                    "Then re-open this Setup Wizard."
-                )
-                return
-
-            try:
-                import requests  # for the 'Test credentials' button
-            except Exception:
-                requests = None
 
             wiz = tk.Toplevel(win)
-            wiz.title("Robinhood API Setup")
-            # Big enough to show the bottom buttons, but still scrolls if the window is resized smaller.
-            wiz.geometry("980x720")
-            wiz.minsize(860, 620)
+            wiz.title("Coinbase API Setup")
+            wiz.geometry("900x650")
+            wiz.minsize(800, 550)
             wiz.configure(bg=DARK_BG)
 
-            # Scrollable content area (same pattern as the Neural Levels scrollbar).
+            # Scrollable content
             viewport = ttk.Frame(wiz)
             viewport.pack(fill="both", expand=True, padx=12, pady=12)
             viewport.grid_rowconfigure(0, weight=1)
             viewport.grid_columnconfigure(0, weight=1)
 
-            wiz_canvas = tk.Canvas(
-                viewport,
-                bg=DARK_BG,
-                highlightthickness=1,
-                highlightbackground=DARK_BORDER,
-                bd=0,
-            )
+            wiz_canvas = tk.Canvas(viewport, bg=DARK_BG, highlightthickness=1, highlightbackground=DARK_BORDER, bd=0)
             wiz_canvas.grid(row=0, column=0, sticky="nsew")
 
             wiz_scroll = ttk.Scrollbar(viewport, orient="vertical", command=wiz_canvas.yview)
@@ -6110,35 +6072,25 @@ class PowerTraderHub(tk.Tk):
             wiz_window = wiz_canvas.create_window((0, 0), window=container, anchor="nw")
             container.columnconfigure(0, weight=1)
 
-            def _update_wiz_scrollbars(event=None) -> None:
-                """Update scrollregion + hide/show the scrollbar depending on overflow."""
+            def _update_wiz_scrollbars(event=None):
                 try:
                     c = wiz_canvas
-                    win_id = wiz_window
-
                     c.update_idletasks()
-                    bbox = c.bbox(win_id)
+                    bbox = c.bbox(wiz_window)
                     if not bbox:
                         wiz_scroll.grid_remove()
                         return
-
                     c.configure(scrollregion=bbox)
                     content_h = int(bbox[3] - bbox[1])
                     view_h = int(c.winfo_height())
-
                     if content_h > (view_h + 1):
                         wiz_scroll.grid()
                     else:
                         wiz_scroll.grid_remove()
-                        try:
-                            c.yview_moveto(0)
-                        except Exception:
-                            pass
                 except Exception:
                     pass
 
-            def _on_wiz_canvas_configure(e) -> None:
-                # Keep the inner frame exactly the canvas width so labels wrap nicely.
+            def _on_wiz_canvas_configure(e):
                 try:
                     wiz_canvas.itemconfigure(wiz_window, width=int(e.width))
                 except Exception:
@@ -6156,401 +6108,114 @@ class PowerTraderHub(tk.Tk):
                     pass
 
             wiz_canvas.bind("<Enter>", lambda _e: wiz_canvas.focus_set(), add="+")
-            wiz_canvas.bind("<MouseWheel>", _wheel, add="+")  # Windows / Mac
-            wiz_canvas.bind("<Button-4>", lambda _e: wiz_canvas.yview_scroll(-3, "units"), add="+")  # Linux
-            wiz_canvas.bind("<Button-5>", lambda _e: wiz_canvas.yview_scroll(3, "units"), add="+")   # Linux
-
+            wiz_canvas.bind("<MouseWheel>", _wheel, add="+")
+            wiz_canvas.bind("<Button-4>", lambda _e: wiz_canvas.yview_scroll(-3, "units"), add="+")
+            wiz_canvas.bind("<Button-5>", lambda _e: wiz_canvas.yview_scroll(3, "units"), add="+")
 
             key_path, secret_path = _api_paths()
+            existing_api_key, existing_api_secret = _read_api_files()
 
-            # Load any existing credentials so users can update without re-generating keys.
-            existing_api_key, existing_private_b64 = _read_api_files()
-            private_b64_state = {"value": (existing_private_b64 or "").strip()}
-
-            # -----------------------------
-            # Helpers (open folder, copy, etc.)
-            # -----------------------------
-            def _open_in_file_manager(path: str) -> None:
+            def _open_in_file_manager(path: str):
                 try:
                     p = os.path.abspath(path)
                     if os.name == "nt":
-                        os.startfile(p)  # type: ignore[attr-defined]
+                        os.startfile(p)
                         return
                     if sys.platform == "darwin":
                         subprocess.Popen(["open", p])
                         return
                     subprocess.Popen(["xdg-open", p])
                 except Exception as e:
-                    messagebox.showerror("Couldn't open folder", f"Tried to open:\n{path}\n\nError:\n{e}")
+                    messagebox.showerror("Couldn't open folder", f"Error: {e}")
 
-            def _copy_to_clipboard(txt: str, title: str = "Copied") -> None:
+            def _copy_to_clipboard(txt: str):
                 try:
                     wiz.clipboard_clear()
                     wiz.clipboard_append(txt)
-                    messagebox.showinfo(title, "Copied to clipboard.")
+                    messagebox.showinfo("Copied", "Copied to clipboard.")
                 except Exception:
                     pass
 
-            def _mask_path(p: str) -> str:
-                try:
-                    return os.path.abspath(p)
-                except Exception:
-                    return p
-
-            # -----------------------------
-            # Big, beginner-friendly instructions
-            # -----------------------------
             intro = (
-                "This trader uses Robinhood's Crypto Trading API credentials.\n\n"
-                "You only do this once. When finished, pt_trader.py can authenticate automatically.\n\n"
-                "✅ What you will do in this window:\n"
-                "  1) Generate a Public Key + Private Key (Ed25519).\n"
-                "  2) Copy the PUBLIC key and paste it into Robinhood to create an API credential.\n"
-                "  3) Robinhood will show you an API Key (usually starts with 'rh...'). Copy it.\n"
-                "  4) Paste that API Key back here and click Save.\n\n"
-                "🧭 EXACTLY where to paste the Public Key on Robinhood (desktop web is best):\n"
-                "  A) Log in to Robinhood on a computer.\n"
-                "  B) Click Account (top-right) → Settings.\n"
-                "  C) Click Crypto.\n"
-                "  D) Scroll down to API Trading and click + Add Key (or Add key).\n"
-                "  E) Paste the Public Key into the Public key field.\n"
-                "  F) Give it any name (example: PowerTrader).\n"
-                "  G) Permissions: this TRADER needs READ + TRADE. (READ-only cannot place orders.)\n"
-                "  H) Click Save. Robinhood shows your API Key — copy it right away (it may only show once).\n\n"
-                "📱 Mobile note: if you can't find API Trading in the app, use robinhood.com in a browser.\n\n"
-                "This wizard will save two files in the same folder as pt_hub.py:\n"
-                "  - r_key.txt    (your API Key)\n"
-                "  - r_secret.txt (your PRIVATE key in base64)  ← keep this secret like a password\n"
+                "Coinbase API Setup for PowerTrader\n\n"
+                "This wizard helps you create and store your Coinbase API credentials.\n\n"
+                "What you'll do:\n"
+                "  1) Open Coinbase and create an API Key with Crypto Trading permissions\n"
+                "  2) Copy your API Key and Secret here\n"
+                "  3) Save them to files (cb_key.txt and cb_secret.txt)\n\n"
+                "Requirements:\n"
+                "  • Coinbase account (verify your identity first)\n"
+                "  • API Key with 'View' and 'Trade' permissions\n"
+                "  • Keep your API Secret private — treat it like a password\n"
             )
+            intro_lbl = ttk.Label(container, text=intro, justify="left", wraplength=750)
+            intro_lbl.grid(row=0, column=0, sticky="ew", pady=(0, 15))
 
-            intro_lbl = ttk.Label(container, text=intro, justify="left")
-            intro_lbl.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+            btns_frame = ttk.Frame(container)
+            btns_frame.grid(row=1, column=0, sticky="ew", pady=(0, 15))
+            ttk.Button(btns_frame, text="Open Coinbase API Portal", command=lambda: webbrowser.open("https://www.coinbase.com/settings/api")).pack(side="left", padx=5)
+            ttk.Button(btns_frame, text="Open Folder", command=lambda: _open_in_file_manager(self.project_dir)).pack(side="left", padx=5)
 
-            top_btns = ttk.Frame(container)
-            top_btns.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-            top_btns.columnconfigure(0, weight=1)
-
-            def open_robinhood_page():
-                # Robinhood entry point. User will still need to click into Settings → Crypto → API Trading.
-                webbrowser.open("https://robinhood.com/account/crypto")
-
-            ttk.Button(top_btns, text="Open Robinhood API Credentials page (Crypto)", command=open_robinhood_page).pack(side="left")
-            ttk.Button(top_btns, text="Open Robinhood Crypto Trading API docs", command=lambda: webbrowser.open("https://docs.robinhood.com/crypto/trading/")).pack(side="left", padx=8)
-            ttk.Button(top_btns, text="Open Folder With r_key.txt / r_secret.txt", command=lambda: _open_in_file_manager(self.project_dir)).pack(side="left", padx=8)
-
-            # -----------------------------
-            # Step 1 — Generate keys
-            # -----------------------------
-            step1 = ttk.LabelFrame(container, text="Step 1 — Generate your keys (click once)")
-            step1.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
+            # Step 1: API Key
+            step1 = ttk.LabelFrame(container, text="Step 1 — API Key")
+            step1.grid(row=2, column=0, sticky="ew", pady=(0, 10))
             step1.columnconfigure(0, weight=1)
 
-            ttk.Label(step1, text="Public Key (this is what you paste into Robinhood):").grid(row=0, column=0, sticky="w", padx=10, pady=(8, 0))
+            ttk.Label(step1, text="Paste your Coinbase API Key:", justify="left").grid(row=0, column=0, sticky="w", padx=10, pady=(8, 4))
+            key_var = tk.StringVar(value=existing_api_key or "")
+            key_ent = ttk.Entry(step1, textvariable=key_var, width=60)
+            key_ent.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
 
-            pub_box = tk.Text(step1, height=4, wrap="none")
-            pub_box.grid(row=1, column=0, sticky="nsew", padx=10, pady=(6, 10))
-            pub_box.configure(bg=DARK_PANEL, fg=DARK_FG, insertbackground=DARK_FG)
-
-            def _render_public_from_private_b64(priv_b64: str) -> str:
-                """Return Robinhood-compatible Public Key: base64(raw_ed25519_public_key_32_bytes)."""
-                try:
-                    raw = base64.b64decode(priv_b64)
-
-                    # Accept either:
-                    #   - 32 bytes: Ed25519 seed
-                    #   - 64 bytes: NaCl/tweetnacl secretKey (seed + public)
-                    if len(raw) == 64:
-                        seed = raw[:32]
-                    elif len(raw) == 32:
-                        seed = raw
-                    else:
-                        return ""
-
-                    pk = ed25519.Ed25519PrivateKey.from_private_bytes(seed)
-                    pub_raw = pk.public_key().public_bytes(
-                        encoding=serialization.Encoding.Raw,
-                        format=serialization.PublicFormat.Raw,
-                    )
-                    return base64.b64encode(pub_raw).decode("utf-8")
-                except Exception:
-                    return ""
-
-            def _set_pub_text(txt: str) -> None:
-                try:
-                    pub_box.delete("1.0", "end")
-                    pub_box.insert("1.0", txt or "")
-                except Exception:
-                    pass
-
-            # If already configured before, show the public key again (derived from stored private key)
-            if private_b64_state["value"]:
-                _set_pub_text(_render_public_from_private_b64(private_b64_state["value"]))
-
-            def generate_keys():
-                # Generate an Ed25519 keypair (Robinhood expects base64 raw public key bytes)
-                priv = ed25519.Ed25519PrivateKey.generate()
-                pub = priv.public_key()
-
-                seed = priv.private_bytes(
-                    encoding=serialization.Encoding.Raw,
-                    format=serialization.PrivateFormat.Raw,
-                    encryption_algorithm=serialization.NoEncryption(),
-                )
-                pub_raw = pub.public_bytes(
-                    encoding=serialization.Encoding.Raw,
-                    format=serialization.PublicFormat.Raw,
-                )
-
-                # Store PRIVATE key as base64(seed32) because pt_thinker.py uses nacl.signing.SigningKey(seed)
-                # and it requires exactly 32 bytes.
-                private_b64_state["value"] = base64.b64encode(seed).decode("utf-8")
-
-                # Show what you paste into Robinhood: base64(raw public key)
-                _set_pub_text(base64.b64encode(pub_raw).decode("utf-8"))
-
-
-                messagebox.showinfo(
-                    "Step 1 complete",
-                    "Public/Private keys generated.\n\n"
-                    "Next (Robinhood):\n"
-                    "  1) Click 'Copy Public Key' in this window\n"
-                    "  2) On Robinhood (desktop web): Account → Settings → Crypto\n"
-                    "  3) Scroll to 'API Trading' → click '+ Add Key'\n"
-                    "  4) Paste the Public Key (base64) into the 'Public key' field\n"
-                    "  5) Enable permissions READ + TRADE (this trader needs both), then Save\n"
-                    "  6) Robinhood shows an API Key (usually starts with 'rh...') — copy it right away\n\n"
-                    "Then come back here and paste that API Key into the 'API Key' box."
-                )
-
-
-
-            def copy_public_key():
-                txt = (pub_box.get("1.0", "end") or "").strip()
-                if not txt:
-                    messagebox.showwarning("Nothing to copy", "Click 'Generate Keys' first.")
-                    return
-                _copy_to_clipboard(txt, title="Public Key copied")
-
-            step1_btns = ttk.Frame(step1)
-            step1_btns.grid(row=2, column=0, sticky="w", padx=10, pady=(0, 10))
-            ttk.Button(step1_btns, text="Generate Keys", command=generate_keys).pack(side="left")
-            ttk.Button(step1_btns, text="Copy Public Key", command=copy_public_key).pack(side="left", padx=8)
-
-            # -----------------------------
-            # Step 2 — Paste API key (from Robinhood)
-            # -----------------------------
-            step2 = ttk.LabelFrame(container, text="Step 2 — Paste your Robinhood API Key here")
-            step2.grid(row=3, column=0, sticky="nsew", pady=(0, 10))
+            # Step 2: API Secret
+            step2 = ttk.LabelFrame(container, text="Step 2 — API Secret")
+            step2.grid(row=3, column=0, sticky="ew", pady=(0, 10))
             step2.columnconfigure(0, weight=1)
 
-            step2_help = (
-                "In Robinhood, after you add the Public Key, Robinhood will show an API Key.\n"
-                "Paste that API Key below. (It often starts with 'rh.'.)"
-            )
-            ttk.Label(step2, text=step2_help, justify="left").grid(row=0, column=0, sticky="w", padx=10, pady=(8, 0))
+            ttk.Label(step2, text="Paste your Coinbase API Secret:", justify="left").grid(row=0, column=0, sticky="w", padx=10, pady=(8, 4))
+            secret_var = tk.StringVar(value=existing_api_secret or "")
+            secret_ent = ttk.Entry(step2, textvariable=secret_var, width=60, show="•")
+            secret_ent.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
 
-            api_key_var = tk.StringVar(value=existing_api_key or "")
-            api_ent = ttk.Entry(step2, textvariable=api_key_var)
-            api_ent.grid(row=1, column=0, sticky="ew", padx=10, pady=(6, 10))
-
-            def _test_credentials() -> None:
-                api_key = (api_key_var.get() or "").strip()
-                priv_b64 = (private_b64_state.get("value") or "").strip()
-
-                if not requests:
-                    messagebox.showerror(
-                        "Missing dependency",
-                        "The 'requests' package is required for the Test button.\n\n"
-                        "Fix: pip install requests\n\n"
-                        "(You can still Save without testing.)"
-                    )
-                    return
-
-                if not priv_b64:
-                    messagebox.showerror("Missing private key", "Step 1: click 'Generate Keys' first.")
-                    return
-                if not api_key:
-                    messagebox.showerror("Missing API key", "Paste the API key from Robinhood into Step 2 first.")
-                    return
-
-                # Safe test: market-data endpoint (no trading)
-                base_url = "https://trading.robinhood.com"
-                path = "/api/v1/crypto/marketdata/best_bid_ask/?symbol=BTC-USD"
-                method = "GET"
-                body = ""
-                ts = int(time.time())
-                msg = f"{api_key}{ts}{path}{method}{body}".encode("utf-8")
-
-                try:
-                    raw = base64.b64decode(priv_b64)
-
-                    # Accept either:
-                    #   - 32 bytes: Ed25519 seed
-                    #   - 64 bytes: NaCl/tweetnacl secretKey (seed + public)
-                    if len(raw) == 64:
-                        seed = raw[:32]
-                    elif len(raw) == 32:
-                        seed = raw
-                    else:
-                        raise ValueError(f"Unexpected private key length: {len(raw)} bytes (expected 32 or 64)")
-
-                    pk = ed25519.Ed25519PrivateKey.from_private_bytes(seed)
-                    sig_b64 = base64.b64encode(pk.sign(msg)).decode("utf-8")
-                except Exception as e:
-                    messagebox.showerror("Bad private key", f"Couldn't use your private key (r_secret.txt).\n\nError:\n{e}")
-                    return
-
-
-                headers = {
-                    "x-api-key": api_key,
-                    "x-timestamp": str(ts),
-                    "x-signature": sig_b64,
-                    "Content-Type": "application/json",
-                }
-
-                try:
-                    resp = requests.get(f"{base_url}{path}", headers=headers, timeout=10)
-                    if resp.status_code >= 400:
-                        # Give layman-friendly hints for common failures
-                        hint = ""
-                        if resp.status_code in (401, 403):
-                            hint = (
-                                "\n\nCommon fixes:\n"
-                                "  • Make sure you pasted the API Key (not the public key).\n"
-                                "  • In Robinhood, ensure the key has permissions READ + TRADE.\n"
-                                "  • If you just created the key, wait 30–60 seconds and try again.\n"
-                            )
-                        messagebox.showerror("Test failed", f"Robinhood returned HTTP {resp.status_code}.\n\n{resp.text}{hint}")
-                        return
-
-                    data = resp.json()
-                    # Try to show something reassuring
-                    ask = None
-                    try:
-                        if data.get("results"):
-                            ask = data["results"][0].get("ask_inclusive_of_buy_spread")
-                    except Exception:
-                        pass
-
-                    messagebox.showinfo(
-                        "Test successful",
-                        "✅ Your API Key + Private Key worked!\n\n"
-                        "Robinhood responded successfully.\n"
-                        f"BTC-USD ask (example): {ask if ask is not None else 'received'}\n\n"
-                        "Next: click Save."
-                    )
-                except Exception as e:
-                    messagebox.showerror("Test failed", f"Couldn't reach Robinhood.\n\nError:\n{e}")
-
-            step2_btns = ttk.Frame(step2)
-            step2_btns.grid(row=2, column=0, sticky="w", padx=10, pady=(0, 10))
-            ttk.Button(step2_btns, text="Test Credentials (safe, no trading)", command=_test_credentials).pack(side="left")
-
-            # -----------------------------
-            # Step 3 — Save
-            # -----------------------------
-            step3 = ttk.LabelFrame(container, text="Step 3 — Save to files (required)")
-            step3.grid(row=4, column=0, sticky="nsew")
+            # Step 3: Save
+            step3 = ttk.LabelFrame(container, text="Step 3 — Save")
+            step3.grid(row=4, column=0, sticky="ew")
             step3.columnconfigure(0, weight=1)
 
             ack_var = tk.BooleanVar(value=False)
-            ack = ttk.Checkbutton(
+            ttk.Checkbutton(
                 step3,
-                text="I understand r_secret.txt is PRIVATE and I will not share it.",
-                variable=ack_var,
-            )
-            ack.grid(row=0, column=0, sticky="w", padx=10, pady=(10, 6))
-
-            save_btns = ttk.Frame(step3)
-            save_btns.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 12))
+                text="I understand the API Secret is PRIVATE and I won't share it.",
+                variable=ack_var
+            ).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 6))
 
             def do_save():
-                api_key = (api_key_var.get() or "").strip()
-                priv_b64 = (private_b64_state.get("value") or "").strip()
+                key = (key_var.get() or "").strip()
+                secret = (secret_var.get() or "").strip()
 
-                if not priv_b64:
-                    messagebox.showerror("Missing private key", "Step 1: click 'Generate Keys' first.")
+                if not key or not secret:
+                    messagebox.showerror("Missing info", "Please paste both API Key and Secret.")
                     return
-
-                # Normalize private key so pt_thinker.py can load it:
-                # - Accept 32 bytes (seed) OR 64 bytes (seed+pub) from older hub versions
-                # - Save ONLY base64(seed32) to r_secret.txt
-                try:
-                    raw = base64.b64decode(priv_b64)
-                    if len(raw) == 64:
-                        raw = raw[:32]
-                        priv_b64 = base64.b64encode(raw).decode("utf-8")
-                        private_b64_state["value"] = priv_b64  # keep UI state consistent
-                    elif len(raw) != 32:
-                        messagebox.showerror(
-                            "Bad private key",
-                            f"Your private key decodes to {len(raw)} bytes, but it must be 32 bytes.\n\n"
-                            "Click 'Generate Keys' again to create a fresh keypair."
-                        )
-                        return
-                except Exception as e:
-                    messagebox.showerror(
-                        "Bad private key",
-                        f"Couldn't decode the private key as base64.\n\nError:\n{e}"
-                    )
+                if not ack_var.get():
+                    messagebox.showerror("Acknowledgment", "Please check the acknowledgment box.")
                     return
-
-                if not api_key:
-                    messagebox.showerror("Missing API key", "Step 2: paste your API key from Robinhood first.")
-                    return
-                if not bool(ack_var.get()):
-                    messagebox.showwarning(
-                        "Please confirm",
-                        "For safety, please check the box confirming you understand r_secret.txt is private."
-                    )
-                    return
-
-
-                # Small sanity warning (don’t block, just help)
-                if len(api_key) < 10:
-                    if not messagebox.askyesno(
-                        "API key looks short",
-                        "That API key looks unusually short. Are you sure you pasted the API Key from Robinhood?"
-                    ):
-                        return
-
-                # Back up existing files (so user can undo mistakes)
-                try:
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    if os.path.isfile(key_path):
-                        shutil.copy2(key_path, f"{key_path}.bak_{ts}")
-                    if os.path.isfile(secret_path):
-                        shutil.copy2(secret_path, f"{secret_path}.bak_{ts}")
-                except Exception:
-                    pass
 
                 try:
                     with open(key_path, "w", encoding="utf-8") as f:
-                        f.write(api_key)
+                        f.write(key)
                     with open(secret_path, "w", encoding="utf-8") as f:
-                        f.write(priv_b64)
+                        f.write(secret)
+                    messagebox.showinfo("Saved", f"✅ Credentials saved:\n  {key_path}\n  {secret_path}")
+                    _refresh_api_status()
+                    wiz.destroy()
                 except Exception as e:
-                    messagebox.showerror("Save failed", f"Couldn't write the credential files.\n\nError:\n{e}")
-                    return
+                    messagebox.showerror("Save failed", f"Error: {e}")
 
-                _refresh_api_status()
-                messagebox.showinfo(
-                    "Saved",
-                    "✅ Saved!\n\n"
-                    "The trader will automatically read these files next time it starts:\n"
-                    f"  API Key → {_mask_path(key_path)}\n"
-                    f"  Private Key → {_mask_path(secret_path)}\n\n"
-                    "Next steps:\n"
-                    "  1) Close this window\n"
-                    "  2) Start the trader (pt_trader.py)\n"
-                    "If something fails, come back here and click 'Test Credentials'."
-                )
-                wiz.destroy()
+            save_btn = ttk.Button(step3, text="Save Credentials", command=do_save)
+            save_btn.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 12))
 
-            ttk.Button(save_btns, text="Save", command=do_save).pack(side="left")
-            ttk.Button(save_btns, text="Close", command=wiz.destroy).pack(side="left", padx=8)
+            _update_wiz_scrollbars()
 
-        ttk.Label(frm, text="Robinhood API:").grid(row=r, column=0, sticky="w", padx=(0, 10), pady=6)
+        ttk.Label(frm, text="Coinbase API:").grid(row=r, column=0, sticky="w", padx=(0, 10), pady=6)
 
         api_row = ttk.Frame(frm)
         api_row.grid(row=r, column=1, columnspan=2, sticky="ew", pady=6)

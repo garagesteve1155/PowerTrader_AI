@@ -1,5 +1,80 @@
-from kucoin.client import Market
-market = Market(url='https://api.kucoin.com')
+import requests
+
+class CoinbaseMarket:
+	"""Coinbase market data fetcher to replace KuCoin Market."""
+	
+	def __init__(self, url='https://api.coinbase.com'):
+		self.base_url = url
+		self.session = requests.Session()
+	
+	def get_kline(self, coin_choice, timeframe, startAt=None, endAt=None):
+		"""
+		Fetch historical candles from Coinbase.
+		Returns list of [timestamp, open, close, high, low, volume] similar to KuCoin format.
+		coin_choice: e.g., 'BTC', 'ETH'
+		timeframe: e.g., '1hour', '1day'
+		"""
+		# Map timeframe to Coinbase granularity in seconds
+		tf_map = {
+			'1min': 60,
+			'5min': 300,
+			'15min': 900,
+			'1hour': 3600,
+			'2hour': 7200,
+			'4hour': 14400,
+			'8hour': 28800,
+			'12hour': 43200,
+			'1day': 86400,
+			'1week': 604800,
+		}
+		granularity = tf_map.get(timeframe, 3600)
+		
+		# Coinbase product ID: BTC-USD, ETH-USD, etc.
+		product_id = f"{coin_choice}-USD"
+		
+		candles = []
+		try:
+			# Coinbase returns candles in reverse chronological order
+			url = f"{self.base_url}/v2/products/{product_id}/candles"
+			params = {'granularity': granularity}
+			if startAt:
+				params['start'] = startAt
+			if endAt:
+				params['end'] = endAt
+			
+			resp = self.session.get(url, params=params, timeout=10)
+			resp.raise_for_status()
+			data = resp.json()
+			
+			# Coinbase returns [time, low, high, open, close, volume]
+			# Convert to KuCoin format: [time, open, close, high, low, volume]
+			for candle in data:
+				if len(candle) >= 6:
+					time, low, high, open_p, close_p, volume = candle[0], candle[1], candle[2], candle[3], candle[4], candle[5]
+					candles.append([time, open_p, close_p, high, low, volume])
+		except Exception as e:
+			print(f"Error fetching candles for {product_id}: {e}")
+			return []
+		
+		return candles
+	
+	def get_ticker(self, coin_choice):
+		"""
+		Fetch current ticker for a coin.
+		Returns dict-like response containing price info.
+		"""
+		product_id = f"{coin_choice}-USD"
+		try:
+			url = f"{self.base_url}/v2/products/{product_id}/ticker"
+			resp = self.session.get(url, timeout=10)
+			resp.raise_for_status()
+			data = resp.json()
+			return data
+		except Exception as e:
+			print(f"Error fetching ticker for {product_id}: {e}")
+			return {}
+
+market = CoinbaseMarket()
 import time
 """
 <------------
@@ -222,7 +297,7 @@ def PrintException():
 how_far_to_look_back = 100000
 number_of_candles = [2]
 number_of_candles_index = 0
-def restart_program():
+def restarted_yet():
 	"""Restarts the current program, with file objects and descriptors cleanup"""
 
 	try:

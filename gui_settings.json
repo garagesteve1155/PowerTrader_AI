@@ -1,0 +1,60 @@
+{
+  "main_neural_dir": "",
+  "coins": [
+    "BTC",
+    "ETH",
+    "BNB",
+    "PAXG",
+    "SOL",
+    "XRP",
+    "DOGE"
+  ],
+  "long_term_holdings": [
+    "BTC",
+    "ETH",
+    "BNB",
+    "PAXG",
+    "SOL",
+    "XRP",
+    "DOGE"
+  ],
+  "lth_profit_alloc_pct": 50.0,
+  "trade_start_level": 4,
+  "start_allocation_pct": 0.5,
+  "dca_multiplier": 2.0,
+  "dca_levels": [
+    -5.0,
+    -10.0,
+    -20.0,
+    -30.0,
+    -40.0,
+    -50.0,
+    -50.0
+  ],
+  "max_dca_buys_per_24h": 1,
+  "pm_start_pct_no_dca": 3.0,
+  "pm_start_pct_with_dca": 3.0,
+  "trailing_gap_pct": 0.1,
+  "hub_data_dir": "",
+  "script_neural_runner2": "pt_thinker.py",
+  "script_neural_trainer": "pt_trainer.py",
+  "script_trader": "pt_trader.py",
+  "timeframes": [
+    "1min",
+    "5min",
+    "15min",
+    "30min",
+    "1hour",
+    "2hour",
+    "4hour",
+    "8hour",
+    "12hour",
+    "1day",
+    "1week"
+  ],
+  "default_timeframe": "1hour",
+  "ui_refresh_seconds": 1.0,
+  "chart_refresh_seconds": 4.0,
+  "candles_limit": 250,
+  "auto_start_scripts": false
+}
