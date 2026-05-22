@@ -84,7 +84,7 @@
   "ui_font_size": 20,
   "ui_log_font_size": 8,
   "ntfy_url": "https://ntfy.sh/swedishhh_cryptoid",
-  "ntfy_summary_interval_minutes": 240,
+  "ntfy_summary_interval_minutes": 0,
   "shadow_starting_usd": 0,
   "demo_starting_usd": 10000,
   "auto_start_scripts": false,
