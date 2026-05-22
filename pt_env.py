@@ -167,7 +167,7 @@ CONFIG_SCHEMA: dict[str, dict] = {
     "dca_multiplier": {
         "type": "float", "min": 0,
         "label": "DCA Multiplier",
-        "hint": "Each DCA buy is this multiple of the previous buy size (0 = DCA disabled)",
+        "hint": "Each DCA buy = account value × Start Allocation % × this multiplier. 1.0 = same size as the opening trade, 2.0 = double. Set to 0 to disable DCA.",
         "group": "Trading",
     },
     "dca_levels": {
@@ -283,9 +283,9 @@ CONFIG_SCHEMA: dict[str, dict] = {
         "group": "Notifications",
     },
     "ntfy_summary_interval_minutes": {
-        "type": "int", "min": 5, "max": 1440,
+        "type": "int", "min": 0, "max": 1440,
         "label": "Summary Interval (min)",
-        "hint": "How often to send the positions summary notification (5–1440 min)",
+        "hint": "How often to send the positions summary notification (5–1440 min). Set to 0 to disable.",
         "group": "Notifications",
     },
 

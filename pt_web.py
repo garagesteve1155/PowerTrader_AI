@@ -322,24 +322,38 @@ async def api_trades(limit: int = 250, exchange: str = ""):
 
 
 @app.get("/api/account-history")
-async def api_account_history(hours: float = 0):
+async def api_account_history(hours: float = 0, start: int = None, end: int = None):
     """Return account value history for all exchanges, resampled to regular intervals."""
     result = {}
-    if hours == 0:
-        interval = 900        # 15 min for ALL
-    elif hours <= 24:
-        interval = 600        # 10 min
-    elif hours <= 168:
-        interval = 3600       # 1 hour
-    else:
-        interval = 14400      # 4 hours
-
     for xk in _active_accounts():
         acct = AccountModel(env, xk)
         raw = acct.account_value_history(limit=0)
-        if hours > 0:
+
+        if start and end:
+            # Windowed fetch for adaptive zoom: resample to ~400 points in the window
+            raw = [r for r in raw if start <= r.get("ts", 0) <= end]
+            if len(raw) >= 2:
+                span = raw[-1]["ts"] - raw[0]["ts"]
+                interval = max(60, int(span / 400))
+            else:
+                interval = 600
+        elif hours > 0:
             cutoff = time.time() - hours * 3600
             raw = [r for r in raw if r.get("ts", 0) >= cutoff]
+            if hours <= 24:
+                interval = 600
+            elif hours <= 168:
+                interval = 3600
+            else:
+                interval = 14400
+        else:
+            # ALL: target ~400 points across full span
+            if len(raw) >= 2:
+                span = raw[-1]["ts"] - raw[0]["ts"]
+                interval = max(900, int(span / 400))
+            else:
+                interval = 900
+
         resampled = _resample(raw, interval) if raw else []
         if raw and resampled and raw[-1]["ts"] > resampled[-1]["ts"]:
             resampled.append(raw[-1])

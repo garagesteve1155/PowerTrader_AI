@@ -3088,7 +3088,7 @@ class CryptoAPITrading:
                 else:
                     reason = f"HARD {hard_level:.2f}%"
 
-                dca_amount = value * float(DCA_MULTIPLIER or 0.0)
+                dca_amount = total_account_value * (START_ALLOC_PCT / 100.0) * float(DCA_MULTIPLIER or 1.0)
                 log.info(
                     f"DCA {symbol} stage {current_stage + 1} via {reason} | value ${value:.2f} | dca ${dca_amount:.2f} | bp ${buying_power:.2f}"
                 )
@@ -3348,8 +3348,9 @@ class CryptoAPITrading:
         # Positions summary notification (configurable interval)
         try:
             now = time.time()
-            _summary_interval = max(5, int(_pt_env.get_config().get("ntfy_summary_interval_minutes") or 60)) * 60
-            if now - self._last_notify_summary_ts >= _summary_interval:
+            _interval_min = int(_pt_env.get_config().get("ntfy_summary_interval_minutes") or 60)
+            _summary_interval = max(5, _interval_min) * 60 if _interval_min > 0 else 0
+            if _summary_interval > 0 and now - self._last_notify_summary_ts >= _summary_interval:
                 self._last_notify_summary_ts = now
                 import pt_notify
                 pt_notify.notify_positions_summary(

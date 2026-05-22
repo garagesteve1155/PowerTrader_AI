@@ -1,0 +1,20 @@
+services:
+  powertrader:
+    image: powertrader:latest
+    ports:
+      - "8080:8080"
+    environment:
+      # Fill in your exchange API keys here.
+      # Only set the exchanges you use — others can be left blank.
+      KRAKEN_API_KEY: ""
+      KRAKEN_API_SECRET: ""
+      BINANCE_API_KEY: ""
+      BINANCE_API_SECRET: ""
+      KUCOIN_API_KEY: ""
+      KUCOIN_API_SECRET: ""
+    volumes:
+      - powertrader_state:/app/state
+    restart: unless-stopped
+
+volumes:
+  powertrader_state:

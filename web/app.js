@@ -1092,7 +1092,7 @@ async function loadAccountChart(hours) {
 
   state.chart = LightweightCharts.createChart(container, {
     width: container.clientWidth,
-    height: container.clientHeight,
+    height: container.clientHeight || 300,
     layout: {
       background: {type: 'solid', color: CHART_COLORS.bg},
       textColor: CHART_COLORS.text,
@@ -1171,6 +1171,47 @@ async function loadAccountChart(hours) {
 
   state.chart.timeScale().fitContent();
 
+  // Adaptive resolution: refetch when the user zooms or pans
+  let _acctRangeTimer = null;
+  let _acctRangeAbort = null;
+  state.chart.timeScale().subscribeVisibleTimeRangeChange(range => {
+    if (!range || state.chartMode !== 'account') return;
+    clearTimeout(_acctRangeTimer);
+    _acctRangeTimer = setTimeout(async () => {
+      if (_acctRangeAbort) _acctRangeAbort.abort();
+      _acctRangeAbort = new AbortController();
+      const span = range.to - range.from;
+      const start = Math.floor(range.from - span);
+      const end   = Math.ceil(range.to   + span);
+      try {
+        const qs = `?start=${start}&end=${end}`;
+        const data = await api('account-history' + qs, {signal: _acctRangeAbort.signal});
+        if (!data.history || state.chartMode !== 'account') return;
+        const visibleRange = state.chart.timeScale().getVisibleRange();
+        const isPct2 = state.acctDisplayMode === 'pct';
+        state.exchangeList.forEach(xk => {
+          const series = state.acctSeries[xk];
+          const raw = (data.history[xk] || []);
+          if (!series || !raw.length) return;
+          const baseVal = raw[0].total_account_value;
+          series.setData(raw.map(h => ({
+            time: Math.floor(h.ts),
+            value: isPct2 ? ((h.total_account_value - baseVal) / baseVal * 100) : h.total_account_value,
+          })));
+        });
+        if (visibleRange) state.chart.timeScale().setVisibleRange(visibleRange);
+      } catch (e) {
+        if (e.name !== 'AbortError') console.error('account range fetch failed:', e);
+      }
+    }, 300);
+  });
+
+  // ResizeObserver to handle panel size changes after chart creation
+  const resizeObserver = new ResizeObserver(() => {
+    if (state.chart) state.chart.applyOptions({width: container.clientWidth, height: container.clientHeight});
+  });
+  resizeObserver.observe(container);
+
   // Build controls: range buttons + $/%  toggle
   const tfContainer = $('#tf-selector');
   tfContainer.style.display = '';
@@ -1206,12 +1247,6 @@ async function loadAccountChart(hours) {
     await _applyAccountData(state.accountRange);
   }, (state.cfg.chart_refresh_seconds && state.cfg.chart_refresh_seconds * 1000) || 30_000);
 
-  const resizeObserver = new ResizeObserver(() => {
-    if (state.chart) {
-      state.chart.applyOptions({width: container.clientWidth, height: container.clientHeight});
-    }
-  });
-  resizeObserver.observe(container);
 }
 
 function _buildAccountLegend() {
