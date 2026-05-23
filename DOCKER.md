@@ -196,3 +196,24 @@ powertrader/
 ```
 
 Back up the entire `powertrader/` folder to preserve your history and settings.
+
+---
+
+## For Maintainers — Publishing to Docker Hub
+
+Run these commands from the repo root whenever you want to ship a new image.
+
+```bash
+# Build (clones latest code from GitHub at build time)
+docker build -t swedishhh/powertrader:latest .
+
+# Tag with a version number (optional but recommended)
+docker tag swedishhh/powertrader:latest swedishhh/powertrader:1.0.0
+
+# Push
+docker login
+docker push swedishhh/powertrader:latest
+docker push swedishhh/powertrader:1.0.0   # if tagged
+```
+
+Users receive the update the next time they click **Pull** in Docker Desktop → Images.
