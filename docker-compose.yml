@@ -13,8 +13,6 @@ services:
       KUCOIN_API_KEY: ""
       KUCOIN_API_SECRET: ""
     volumes:
-      - powertrader_state:/app/state
+      - ./state:/app/state
+      - ./pt_config.json:/app/pt_config.json
     restart: unless-stopped
-
-volumes:
-  powertrader_state:

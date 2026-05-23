@@ -1719,8 +1719,15 @@ class CryptoAPITrading:
                             frac = 1.0
 
                         cost_used = pos_cost * frac
-                        pos["usd_cost"] = pos_cost - cost_used
-                        pos["qty"] = pos_qty - q
+                        remaining_qty = pos_qty - q
+                        # Snap to zero if residual qty is dust — prevents float
+                        # precision leaking stale cost into the next trade cycle.
+                        if remaining_qty <= 1e-8:
+                            pos["usd_cost"] = 0.0
+                            pos["qty"] = 0.0
+                        else:
+                            pos["usd_cost"] = pos_cost - cost_used
+                            pos["qty"] = remaining_qty
 
                         position_cost_used = float(cost_used)
                         position_cost_after = float(pos.get("usd_cost", 0.0) or 0.0)
@@ -3203,6 +3210,21 @@ class CryptoAPITrading:
                 if bot_qty > 1e-12:
                     holding_full_symbols.append(f"{asset}_USD")
 
+            except Exception:
+                continue
+
+        # Fallback: if the ledger knows we hold a coin but the exchange API didn't
+        # report it (stale response, mid-settlement, or post-restart), treat it as
+        # held so we don't double-enter.
+        for asset, pos in (self._pnl_ledger.get("open_positions", {}) or {}).items():
+            try:
+                if not isinstance(pos, dict):
+                    continue
+                if float(pos.get("qty", 0.0) or 0.0) > 1e-12:
+                    sym = f"{asset.upper()}_USD"
+                    if sym not in holding_full_symbols:
+                        log.debug(f"holding guard: {asset} held in ledger but missing from exchange holdings — treating as held")
+                        holding_full_symbols.append(sym)
             except Exception:
                 continue
 

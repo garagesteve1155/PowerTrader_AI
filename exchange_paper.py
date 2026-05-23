@@ -252,6 +252,16 @@ class PaperExchange(Exchange):
             return None
         return Path(self._state_path).parent
 
+    def _append_trade_history(self, record: dict) -> None:
+        d = self._state_dir()
+        if not d:
+            return
+        try:
+            with open(d / "trade_history.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+        except Exception:
+            pass
+
     def _append_account_value(self, total: float) -> None:
         d = self._state_dir()
         if not d:
@@ -400,7 +410,24 @@ class ShadowedExchange(Exchange):
                     or ((result.avg_price or 0) * (result.filled_qty or 0))
                     or amount_usd
                 )
-                self._shadow.place_buy(symbol, notional)
+                shadow_result = self._shadow.place_buy(symbol, notional)
+                if shadow_result:
+                    self._shadow._append_trade_history({
+                        "ts": time.time(),
+                        "side": "buy",
+                        "tag": None,
+                        "symbol": symbol,
+                        "qty": shadow_result.filled_qty,
+                        "price": shadow_result.avg_price,
+                        "notional_usd": shadow_result.notional_usd,
+                        "net_usd": -(shadow_result.notional_usd or 0),
+                        "avg_cost_basis": None,
+                        "pnl_pct": None,
+                        "fees_usd": 0.0,
+                        "fees_missing": False,
+                        "order_id": shadow_result.order_id,
+                        "exchange": "shadow",
+                    })
             except Exception as e:
                 pt_errors.emit(
                     "exchange-shadow", level="error",
@@ -420,7 +447,24 @@ class ShadowedExchange(Exchange):
             shadow_qty = self._shadow.get_holdings().get(base, 0)
             if shadow_qty > 1e-12:
                 try:
-                    self._shadow.place_sell(symbol, shadow_qty)
+                    shadow_result = self._shadow.place_sell(symbol, shadow_qty)
+                    if shadow_result:
+                        self._shadow._append_trade_history({
+                            "ts": time.time(),
+                            "side": "sell",
+                            "tag": None,
+                            "symbol": symbol,
+                            "qty": shadow_result.filled_qty,
+                            "price": shadow_result.avg_price,
+                            "notional_usd": shadow_result.notional_usd,
+                            "net_usd": shadow_result.notional_usd or 0,
+                            "avg_cost_basis": None,
+                            "pnl_pct": None,
+                            "fees_usd": 0.0,
+                            "fees_missing": False,
+                            "order_id": shadow_result.order_id,
+                            "exchange": "shadow",
+                        })
                 except Exception as e:
                     pt_errors.emit(
                         "exchange-shadow", level="error",

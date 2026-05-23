@@ -1053,6 +1053,18 @@ def _record_close_trade(xk: str, coin: str, symbol: str, qty: float, result,
             detail="A close-trade record could not be appended to trade history. The trade was executed on the exchange but will not appear in the Trades tab or PnL calculations.",
         )
 
+    # Clear bot order IDs for this coin so the next trade cycle starts fresh.
+    # Without this, stale order IDs from the closed position inflate the cost
+    # basis when the position is rebuilt from selected orders on next startup.
+    try:
+        ids_path = env.bot_order_ids_path(xk)
+        if ids_path.exists():
+            ids = json.loads(ids_path.read_text())
+            ids.pop(coin, None)
+            ids_path.write_text(json.dumps(ids, indent=2))
+    except Exception:
+        pass
+
 
 @app.post("/api/sync-shadow")
 async def api_sync_shadow():
