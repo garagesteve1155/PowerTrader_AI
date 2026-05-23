@@ -273,8 +273,9 @@ Back up the entire `powertrader/` folder to preserve your history and settings.
 Run these commands from the repo root whenever you want to ship a new image.
 
 ```bash
-# Build (clones latest code from GitHub at build time)
-docker build -t swedishhh/powertrader:latest .
+# Build — the CACHEBUST arg forces a fresh git clone every time,
+# preventing Docker from serving stale cached code.
+docker build --build-arg CACHEBUST=$(date +%s) -t swedishhh/powertrader:latest .
 
 # Tag with a version number (optional but recommended)
 docker tag swedishhh/powertrader:latest swedishhh/powertrader:1.0.0

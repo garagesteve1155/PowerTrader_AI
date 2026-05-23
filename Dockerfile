@@ -19,6 +19,8 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 
 WORKDIR /app
 
+# Pass --build-arg CACHEBUST=$(date +%s) to force a fresh clone
+ARG CACHEBUST=1
 RUN git clone https://github.com/swedishhh/PowerTrader_AI.git .
 
 RUN pip install --no-cache-dir -r requirements.txt
