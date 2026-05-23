@@ -156,12 +156,77 @@ Everything is done from **Docker Desktop → Containers**:
 
 ## Updating to a New Version
 
-1. Docker Desktop → **Images** → find `swedishhh/powertrader` → click **Pull** to fetch the latest
-2. Go to **Containers** → Stop the `powertrader` container
-3. Delete the stopped container (click the bin icon) — *your data folder is untouched*
-4. Go back to **Images** → click **▶ Run** on `swedishhh/powertrader` → fill in the same port and volume settings as before → **Run**
+### Recommended — command line (two commands, no re-entering settings)
 
-Your trading history, settings, and market data are all in your data folder and are not affected by updates.
+If you have done the one-time compose setup below, updating is always just:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+This pulls the new image, stops the old container, and starts a fresh one with all your settings preserved automatically.
+
+### GUI only — Docker Desktop
+
+If you are not using the compose setup:
+
+1. Docker Desktop → **Images** → find `swedishhh/powertrader` → click **Pull**
+2. **Containers** → Stop the `powertrader` container → delete it (bin icon) — *your data folder is untouched*
+3. **Images** → **▶ Run** → fill in the same port and volume settings → **Run**
+
+Your trading history, settings, and market data are all in your data folder and are never affected by updates.
+
+---
+
+## One-time Compose Setup (saves settings permanently)
+
+This is a small one-time terminal step that makes all future updates a single command. You only do this once.
+
+**Mac / Linux** — open Terminal:
+
+```bash
+# Create a folder for the compose files (separate from your data folder)
+mkdir ~/powertrader-app && cd ~/powertrader-app
+
+# Download the two config files
+curl -o docker-compose.yml https://raw.githubusercontent.com/swedishhh/PowerTrader_AI/main/docker-compose.yml
+curl -o .env https://raw.githubusercontent.com/swedishhh/PowerTrader_AI/main/.env.example
+
+# Set your data directory path
+echo 'POWERTRADER_ROOT=/Users/yourname/powertrader' > .env   # Mac
+# echo 'POWERTRADER_ROOT=/home/yourname/powertrader' > .env  # Linux
+
+# Pull and start
+docker compose pull
+docker compose up -d
+```
+
+**Windows** — open PowerShell:
+
+```powershell
+# Create a folder for the compose files
+New-Item -ItemType Directory -Force C:\powertrader-app
+cd C:\powertrader-app
+
+# Download the two config files
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/swedishhh/PowerTrader_AI/main/docker-compose.yml -OutFile docker-compose.yml
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/swedishhh/PowerTrader_AI/main/.env.example -OutFile .env
+
+# Edit .env and set POWERTRADER_ROOT=C:/Users/yourname/powertrader
+notepad .env
+
+# Pull and start
+docker compose pull
+docker compose up -d
+```
+
+From this point on, every update is:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+The container appears in Docker Desktop → **Containers** and can be managed from the GUI as normal.
 
 ---
 
