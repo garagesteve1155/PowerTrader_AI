@@ -223,7 +223,11 @@ docker compose up -d
 From this point on, every update is:
 
 ```bash
+# Mac / Linux
 docker compose pull && docker compose up -d
+
+# Windows (PowerShell)
+docker compose pull; docker compose up -d
 ```
 
 The container appears in Docker Desktop → **Containers** and can be managed from the GUI as normal.
