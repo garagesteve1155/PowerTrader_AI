@@ -58,7 +58,8 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # Coins
     "coins": ["BTC", "ETH", "BNB", "PAXG", "SOL", "XRP", "DOGE", "TRX", "HYPE",
               "ADA", "XMR", "XLM", "LINK", "ZEC", "AVAX", "DOT", "CRO", "BCH",
-              "LTC", "SUI", "SHIB", "TAO", "MNT", "UNI", "NEAR", "POL", "ATOM", "ALGO"],
+              "LTC", "SUI", "SHIB", "TAO", "MNT", "UNI", "NEAR", "POL", "ATOM",
+              "ALGO", "HBAR", "ONDO"],
     "trading_mode": "demo",
     "exchange": "",
     "shadow_sync_exchange": "",
@@ -66,10 +67,10 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     "long_term_holdings": ["BTC", "ETH", "SOL"],
 
     # Trading
-    "trade_start_level": 4,
+    "trade_start_level": 2,
     "start_allocation_pct": 1.0,
     "dca_multiplier": 1.0,
-    "dca_levels": [-5, -10, -20, -30, -40, -50, -50],
+    "dca_levels": [-5, -10, -20, -30, -40, -50],
     "max_dca_buys_per_24h": 1,
 
     # Trailing profit
