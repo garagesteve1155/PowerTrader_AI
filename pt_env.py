@@ -9,7 +9,6 @@ use get_config() for a cached, mtime-fresh snapshot and set_config() to write ch
 
 import json
 import os
-import shutil
 import threading
 from datetime import datetime, timezone as _tz
 from pathlib import Path
@@ -476,19 +475,11 @@ class PTEnv:
         with self._lock:
             current = self._read_config_locked()
             merged = {**current, **patch}
-            tmp = self.config_path.with_suffix(".tmp")
-            try:
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(merged, f, indent=2)
-                # shutil.move handles cross-filesystem moves (e.g. Docker bind mounts)
-                # where os.rename / Path.rename raises OSError [Errno 16].
-                shutil.move(str(tmp), str(self.config_path))
-            finally:
-                if tmp.exists():
-                    try:
-                        tmp.unlink()
-                    except Exception:
-                        pass
+            # Write directly to config_path. Rename/move to a bind-mounted file
+            # fails on Docker with EBUSY (errno 16) even with shutil.move, so we
+            # skip the temp-file pattern here. The lock ensures thread safety.
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                json.dump(merged, f, indent=2)
             # Invalidate cache so next get_config() re-reads
             self._config_mtime = None
             self._config_cache = None
