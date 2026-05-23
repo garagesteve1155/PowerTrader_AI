@@ -13,6 +13,7 @@ import io
 import json
 import os
 import threading
+from pt_env import utc_to_ts
 import time
 from typing import Optional
 
@@ -104,7 +105,10 @@ def _price_chart(base: str, avg_cost_basis: float, exit_price: float,
                     for line in f:
                         try:
                             obj = json.loads(line)
-                            if float(obj.get("ts", 0)) >= cutoff:
+                            ts_val = obj.get("ts", 0)
+                            ts_f = utc_to_ts(ts_val) if isinstance(ts_val, str) else float(ts_val or 0)
+                            if ts_f >= cutoff:
+                                obj["ts"] = ts_f
                                 rows.append(obj)
                         except Exception:
                             continue
@@ -349,7 +353,10 @@ def _equity_chart(account_history_path: str) -> Optional[bytes]:
             for line in f:
                 try:
                     obj = json.loads(line)
-                    if float(obj.get("ts", 0)) >= cutoff:
+                    ts_val = obj.get("ts", 0)
+                    ts_f = utc_to_ts(ts_val) if isinstance(ts_val, str) else float(ts_val or 0)
+                    if ts_f >= cutoff:
+                        obj["ts"] = ts_f
                         rows.append(obj)
                 except Exception:
                     continue

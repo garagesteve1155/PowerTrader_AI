@@ -19,7 +19,7 @@ import time
 import ccxt
 import pandas as pd
 
-from pt_env import PTEnv, TRAIN_TF_MINUTES, TRAIN_TF_CCXT
+from pt_env import PTEnv, TRAIN_TF_MINUTES, TRAIN_TF_CCXT, utcnow, utc_to_ts
 import pt_errors
 from pt_log import get_logger
 
@@ -52,14 +52,14 @@ def _get_arctic():
 
 
 def _write_status(state: str, coin: str = "", tf: int = 0,
-                  error_coins: list = None, last_topup: float = 0.0):
+                  error_coins: list = None, last_topup: str = ""):
     status = {
         "state": state,
         "coin": coin,
         "tf_minutes": tf,
         "last_topup": last_topup,
         "error_coins": error_coins or [],
-        "ts": time.time(),
+        "ts": utcnow(),
     }
     path = _env.data_manager_status_path()
     try:
@@ -269,7 +269,7 @@ def run():
     if error_coins:
         log.warning(f"problem coins: {', '.join(error_coins)}")
 
-    last_topup = time.time()
+    last_topup = utcnow()
     _write_status("Normal", error_coins=error_coins, last_topup=last_topup)
     log.info(f"initial pass complete — next topup in {interval_s/3600:.1f}h")
 
@@ -282,7 +282,7 @@ def run():
         coins = [str(c).upper() for c in cfg.get("coins", []) if str(c).strip()]
         interval_s = _topup_interval_seconds(cfg)
 
-        if time.time() - last_topup < interval_s:
+        if time.time() - utc_to_ts(last_topup) < interval_s:
             continue
 
         log.info("scheduled topup starting")
@@ -314,7 +314,7 @@ def run():
             else:
                 _backfill_coin(client, arctic, coin, error_coins)
 
-        last_topup = time.time()
+        last_topup = utcnow()
         _write_status("Normal", error_coins=error_coins, last_topup=last_topup)
         log.info(f"topup complete — next in {interval_s/3600:.1f}h")
 
@@ -345,7 +345,7 @@ def run_single(coin: str):
     if prior_state not in ("Normal", "Topup", "Backfill"):
         prior_state = "Normal"
     _write_status(prior_state, error_coins=error_coins,
-                  last_topup=existing.get("last_topup", 0))
+                  last_topup=existing.get("last_topup", ""))
     log.info(f"one-shot backfill complete: {coin}")
 
 

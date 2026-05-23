@@ -12,6 +12,7 @@ import json
 import os
 import time
 from datetime import datetime
+from pt_env import utcnow
 
 _path_cache: str | None = None
 
@@ -34,7 +35,7 @@ def emit(component: str, message: str, level: str = "error", detail: str = "") -
         path = _errors_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         entry = json.dumps({
-            "ts": time.time(),
+            "ts": utcnow(),
             "component": component,
             "level": level,
             "message": message,

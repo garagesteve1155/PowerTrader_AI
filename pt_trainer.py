@@ -21,6 +21,7 @@ from pt_env import (
     TRAIN_TF_MINUTES,
     TRAIN_TF_NAMES,
     VALID_DATA_SOURCES,
+    utcnow,
 )
 from pt_env import PTEnv
 
@@ -567,7 +568,7 @@ class StatusWriter:
 
     def __init__(self, coin: str):
         self.coin = coin
-        self.started_at = int(time.time())
+        self.started_at = utcnow()
 
     def write_training(self):
         self._write_json(
@@ -582,7 +583,7 @@ class StatusWriter:
         self._write_json("trainer_failure_info.json", {})
 
     def write_finished(self):
-        finished_at = int(time.time())
+        finished_at = utcnow()
         self._write_json(
             "trainer_status.json",
             {
@@ -593,11 +594,11 @@ class StatusWriter:
                 "timestamp": finished_at,
             },
         )
-        _write_file("trainer_last_training_time.txt", str(finished_at))
-        _write_file("trainer_last_start_time.txt", str(self.started_at))
+        _write_file("trainer_last_training_time.txt", finished_at)
+        _write_file("trainer_last_start_time.txt", self.started_at)
 
     def write_failure(self, exc: BaseException, tb_str: str = ""):
-        failed_at = int(time.time())
+        failed_at = utcnow()
         error_msg = f"{type(exc).__name__}: {exc}"
         self._write_json(
             "trainer_status.json",

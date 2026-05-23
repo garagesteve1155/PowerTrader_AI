@@ -56,7 +56,7 @@ import time
 import pt_errors
 from kucoin.client import Market
 from pt_env import TRAIN_TF_NAMES as tf_choices
-from pt_env import PTEnv
+from pt_env import PTEnv, utcnow, utc_to_ts, ts_to_utc
 from pt_log import get_logger
 
 market = Market(url="https://api.kucoin.com")
@@ -224,7 +224,7 @@ def _write_lth_ema200_snapshot() -> None:
         if ema200 is None or price is None:
             continue
         coins[sym] = {"ema200": ema200, "price": price, "pct_from_ema200": pct}
-    payload = {"ts": now, "coins": coins}
+    payload = {"ts": utcnow(), "coins": coins}
     try:
         with open(LTH_EMA200_PATH, "w", encoding="utf-8") as f:
             json.dump(payload, f)
@@ -269,7 +269,7 @@ def _coin_is_trained(sym: str) -> bool:
             return False
         with open(stamp_path, "r", encoding="utf-8") as f:
             raw = (f.read() or "").strip()
-        ts = float(raw) if raw else 0.0
+        ts = (utc_to_ts(raw) if "T" in raw else float(raw)) if raw else 0.0
         if ts <= 0:
             return False
         stale_secs = _env.get_config()["training_staleness_days"] * 86400
@@ -292,11 +292,11 @@ def _state_path(sym: str) -> str:
 def _save_coin_state(sym: str, st: dict) -> None:
     try:
         data = dict(st)
-        data["saved_at"] = time.time()
+        data["saved_at"] = utcnow()
         path = _state_path(sym)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f)
+            json.dump(data, f, indent=2)
         os.replace(tmp, path)
     except Exception as e:
         pt_errors.emit(
@@ -318,7 +318,9 @@ def _load_coin_state(sym: str) -> dict | None:
             return None
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if time.time() - float(data.get("saved_at", 0)) > 86400:
+        saved = data.get("saved_at", 0)
+        saved_ts = utc_to_ts(saved) if isinstance(saved, str) else float(saved or 0)
+        if time.time() - saved_ts > 86400:
             return None
         if data.get("last_display_bounds_version", -1) < 1:
             return None
@@ -350,7 +352,7 @@ def _write_thinker_ready(
     ready: bool, stage: str, ready_coins=None, total_coins: int = 0
 ) -> None:
     obj = {
-        "timestamp": time.time(),
+        "timestamp": utcnow(),
         "ready": bool(ready),
         "stage": stage,
         "ready_coins": ready_coins or [],
@@ -1271,9 +1273,10 @@ def step_coin(sym: str):
                 working_minute = (
                     str(history_list[1]).replace('"', "").replace("'", "").split(", ")
                 )
-                the_time = working_minute[0].replace("[", "")
+                raw_time = working_minute[0].replace("[", "")
+                the_time = ts_to_utc(float(raw_time)) if raw_time else "0"
             except Exception:
-                the_time = 0.0
+                the_time = "0"
 
             if the_time != tf_times[this_index_now]:
                 del tf_update[this_index_now]

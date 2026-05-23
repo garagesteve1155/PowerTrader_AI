@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from pt_env import PTEnv
+from pt_env import PTEnv, utcnow
 from pt_models import CoinModel, SystemModel
 import pt_errors
 
@@ -212,7 +212,7 @@ class ProcessController:
         try:
             rr_path.parent.mkdir(parents=True, exist_ok=True)
             with open(rr_path, "w") as f:
-                json.dump({"timestamp": time.time(), "ready": False, "stage": "starting"}, f)
+                json.dump({"timestamp": utcnow(), "ready": False, "stage": "starting"}, f)
         except Exception:
             pass
 
@@ -220,7 +220,7 @@ class ProcessController:
         try:
             with open(ar_path, "w") as f:
                 json.dump({
-                    "timestamp": time.time(),
+                    "timestamp": utcnow(),
                     "should_be_running": True,
                     "user_stopped_from_hub": False,
                     "last_auto_restart_ts": 0.0,
@@ -241,7 +241,7 @@ class ProcessController:
         try:
             with open(ar_path, "w") as f:
                 json.dump({
-                    "timestamp": time.time(),
+                    "timestamp": utcnow(),
                     "should_be_running": False,
                     "user_stopped_from_hub": True,
                     "last_auto_restart_ts": 0.0,

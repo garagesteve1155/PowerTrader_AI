@@ -28,6 +28,7 @@ from typing import Dict, List, Optional, Tuple
 from exchange_api import Exchange, OrderResult
 from price_source import get_mid_price
 import pt_errors
+from pt_env import utcnow
 
 _DEFAULT_STARTING_USD = 10_000.0
 
@@ -183,7 +184,7 @@ class PaperExchange(Exchange):
             "id": order_id, "side": "buy", "symbol": symbol,
             "state": "filled", "qty": qty, "price": price,
             "notional": cost, "fees": 0.0,
-            "ts": time.time(),
+            "ts": utcnow(),
         }
         self._orders.setdefault(symbol, []).append(order_rec)
         self._save_state()
@@ -228,7 +229,7 @@ class PaperExchange(Exchange):
             "id": order_id, "side": "sell", "symbol": symbol,
             "state": "filled", "qty": qty, "price": price,
             "notional": proceeds, "fees": 0.0,
-            "ts": time.time(),
+            "ts": utcnow(),
         }
         self._orders.setdefault(symbol, []).append(order_rec)
         self._save_state()
@@ -268,7 +269,7 @@ class PaperExchange(Exchange):
             return
         try:
             with open(d / "account_value_history.jsonl", "a", encoding="utf-8") as f:
-                f.write(json.dumps({"ts": time.time(), "total_account_value": total}) + "\n")
+                f.write(json.dumps({"ts": utcnow(), "total_account_value": total}) + "\n")
         except Exception as e:
             pt_errors.emit(
                 f"exchange-{self._key}", level="warning",
@@ -316,7 +317,7 @@ class PaperExchange(Exchange):
             }
 
         status = {
-            "timestamp": ts,
+            "timestamp": utcnow(),
             "account": {
                 "total_account_value": total,
                 "buying_power": self._usd_balance,
@@ -413,7 +414,7 @@ class ShadowedExchange(Exchange):
                 shadow_result = self._shadow.place_buy(symbol, notional)
                 if shadow_result:
                     self._shadow._append_trade_history({
-                        "ts": time.time(),
+                        "ts": utcnow(),
                         "side": "buy",
                         "tag": None,
                         "symbol": symbol,
@@ -450,7 +451,7 @@ class ShadowedExchange(Exchange):
                     shadow_result = self._shadow.place_sell(symbol, shadow_qty)
                     if shadow_result:
                         self._shadow._append_trade_history({
-                            "ts": time.time(),
+                            "ts": utcnow(),
                             "side": "sell",
                             "tag": None,
                             "symbol": symbol,

@@ -10,8 +10,26 @@ use get_config() for a cached, mtime-fresh snapshot and set_config() to write ch
 import json
 import os
 import threading
+from datetime import datetime, timezone as _tz
 from pathlib import Path
 from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Timestamp helpers
+# ---------------------------------------------------------------------------
+
+def utcnow() -> str:
+    """Current UTC time as ISO-8601 string: '2026-05-22T14:32:00Z'"""
+    return datetime.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def ts_to_utc(ts: float) -> str:
+    """Convert Unix float timestamp to ISO-8601 UTC string."""
+    return datetime.fromtimestamp(ts, _tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def utc_to_ts(s: str) -> float:
+    """Convert ISO-8601 UTC string to Unix float timestamp."""
+    return datetime.fromisoformat(s.rstrip("Z")).replace(tzinfo=_tz.utc).timestamp()
 
 
 # ---------------------------------------------------------------------------

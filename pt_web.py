@@ -28,7 +28,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pt_controller import ProcessController
-from pt_env import TRAIN_TF_MINUTES, PTEnv
+from pt_env import TRAIN_TF_MINUTES, PTEnv, utcnow, utc_to_ts
 from pt_models import AccountModel, CoinModel, SystemModel
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -259,7 +259,9 @@ async def api_coins():
             ts = status_by_xk[xk]
             pos = positions_by_xk[xk].get(coin, {})
             snap["positions"][xk] = pos if pos.get("quantity", 0) > 0 else None
-            age = _now - float(ts.get("timestamp", 0) or 0)
+            _ts_val = ts.get("timestamp", 0) or 0
+            _ts_f = utc_to_ts(_ts_val) if isinstance(_ts_val, str) else float(_ts_val)
+            age = _now - _ts_f
             if age > _PRICE_STALE_SEC:
                 continue
             buy = pos.get("current_buy_price", 0)
@@ -659,7 +661,9 @@ async def api_errors(limit: int = 200, level: str = "", component: str = "", sin
                     continue
                 if component and e.get("component") != component:
                     continue
-                if since and float(e.get("ts", 0)) < since:
+                _ets = e.get("ts", 0)
+                _ets_f = utc_to_ts(_ets) if isinstance(_ets, str) else float(_ets or 0)
+                if since and _ets_f < since:
                     continue
                 entries.append(e)
             except Exception:
@@ -730,7 +734,7 @@ def _refresh_exchange_balance(xk: str, write_history: bool = True):
         if write_history and total_value > 0:
             hist_path = env.account_history_path(xk)
             with open(hist_path, "a") as f:
-                f.write(json.dumps({"ts": time.time(), "total_account_value": total_value}) + "\n")
+                f.write(json.dumps({"ts": utcnow(), "total_account_value": total_value}) + "\n")
     except Exception as e:
         print(f"[Balance] {xk} refresh failed: {e}")
         pt_errors.emit(
@@ -975,7 +979,7 @@ def _clear_trader_positions(xk: str):
 def _record_close_trade(xk: str, coin: str, symbol: str, qty: float, result,
                         tag: str = "CLOSE_ALL"):
     """Record a close sell in trade history and update PnL ledger."""
-    ts = time.time()
+    ts = utcnow()
     price = result.avg_price
     notional = result.notional_usd or (price * qty if price else None)
     fees = result.fees_usd

@@ -149,7 +149,7 @@ from typing import Any, Dict, List, Optional
 import colorama
 import pt_errors
 from exchange_api import Exchange, OrderResult, load_exchange
-from pt_env import PTEnv
+from pt_env import PTEnv, utcnow, utc_to_ts
 from pt_log import get_logger
 
 # Initialize colorama
@@ -448,7 +448,8 @@ class CryptoAPITrading:
                     if side != "sell":
                         continue
                     try:
-                        ts_f = float(obj.get("ts", 0.0) or 0.0)
+                        _ts = obj.get("ts")
+                        ts_f = utc_to_ts(_ts) if _ts else 0.0
                     except Exception:
                         ts_f = 0.0
 
@@ -468,7 +469,8 @@ class CryptoAPITrading:
                     continue
 
                 try:
-                    ts_f = float(obj.get("ts", 0.0) or 0.0)
+                    _ts = obj.get("ts")
+                    ts_f = utc_to_ts(_ts) if _ts else 0.0
                 except Exception:
                     ts_f = 0.0
 
@@ -588,7 +590,7 @@ class CryptoAPITrading:
             if not isinstance(d, dict):
                 d = {}
             d.setdefault("total_realized_profit_usd", 0.0)
-            d.setdefault("last_updated_ts", time.time())
+            d.setdefault("last_updated_ts", utcnow())
             d.setdefault(
                 "open_positions", {}
             )  # { "BTC": {"usd_cost": float, "qty": float} }
@@ -627,7 +629,7 @@ class CryptoAPITrading:
         return _upgrade(
             {
                 "total_realized_profit_usd": 0.0,
-                "last_updated_ts": time.time(),
+                "last_updated_ts": utcnow(),
                 "open_positions": {},
                 "pending_orders": {},
                 "lth_profit_bucket_usd": 0.0,
@@ -637,7 +639,7 @@ class CryptoAPITrading:
 
     def _save_pnl_ledger(self) -> None:
         try:
-            self._pnl_ledger["last_updated_ts"] = time.time()
+            self._pnl_ledger["last_updated_ts"] = utcnow()
             self._atomic_write_json(PNL_LEDGER_PATH, self._pnl_ledger)
         except Exception:
             pass
@@ -854,7 +856,7 @@ class CryptoAPITrading:
         if ok:
             self._pnl_ledger["lth_profit_bucket_usd"] = 0.0
             self._pnl_ledger["lth_last_buy"] = {
-                "ts": time.time(),
+                "ts": utcnow(),
                 "symbol": pick,
                 "usd": float(spend_now),
                 "pct_from_ema200": (
@@ -1283,7 +1285,8 @@ class CryptoAPITrading:
                             if obj.get("fees_usd") is not None
                             else 0.0
                         )
-                        ts = float(obj.get("ts", 0) or 0)
+                        _ts = obj.get("ts")
+                        ts = utc_to_ts(_ts) if _ts else 0.0
                         if qty > 0 and notional > 0:
                             out[oid] = {
                                 "qty": qty,
@@ -1593,7 +1596,7 @@ class CryptoAPITrading:
     def _record_skip(self, symbol: str, reason: str) -> None:
         """Record a skipped buy in trade_history so the UI can show it."""
         entry = {
-            "ts": time.time(),
+            "ts": utcnow(),
             "side": "skip",
             "tag": "SKIP",
             "symbol": symbol,
@@ -1630,7 +1633,7 @@ class CryptoAPITrading:
         - If fees_usd is missing (None), we fall back to subtracting $0.02 from the *trade's*
           realized profit (SELL) so totals match the real account.
         """
-        ts = time.time()
+        ts = utcnow()
         side_l = str(side or "").lower().strip()
         base = str(symbol or "").upper().split("_")[0].split("-")[0].strip()
         tag_u = str(tag or "").upper().strip()
@@ -2126,7 +2129,9 @@ class CryptoAPITrading:
                         continue
 
                     try:
-                        ts_f = float(ts)
+                        ts_f = utc_to_ts(ts) if ts else 0.0
+                        if not ts_f:
+                            continue
                     except Exception:
                         continue
 
@@ -3332,7 +3337,7 @@ class CryptoAPITrading:
         # --- GUI HUB STATUS WRITE ---
         try:
             status = {
-                "timestamp": time.time(),
+                "timestamp": utcnow(),
                 "account": {
                     "total_account_value": total_account_value,
                     "buying_power": buying_power,
@@ -3357,7 +3362,7 @@ class CryptoAPITrading:
                 self._last_history_write_ts = now
                 self._append_jsonl(
                     ACCOUNT_VALUE_HISTORY_PATH,
-                    {"ts": now, "total_account_value": total_account_value},
+                    {"ts": utcnow(), "total_account_value": total_account_value},
                 )
         except Exception as e:
             pt_errors.emit(

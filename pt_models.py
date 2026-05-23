@@ -9,7 +9,7 @@ import json
 import time
 from pathlib import Path
 
-from pt_env import PTEnv
+from pt_env import PTEnv, utc_to_ts
 
 
 def _read_json(path: Path) -> dict | None:
@@ -18,6 +18,17 @@ def _read_json(path: Path) -> dict | None:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return None
+
+
+def _norm_ts(record: dict) -> dict:
+    """Convert a persisted ISO-8601 'ts' string to a float in-place for callers that do arithmetic."""
+    raw = record.get("ts")
+    if isinstance(raw, str):
+        try:
+            record["ts"] = utc_to_ts(raw)
+        except Exception:
+            record["ts"] = 0.0
+    return record
 
 
 def _read_jsonl(path: Path, limit: int = 250) -> list[dict]:
@@ -111,7 +122,8 @@ class CoinModel:
     def is_trained(self) -> bool:
         path = self.env.trainer_time_path(self.coin)
         try:
-            ts = float(path.read_text().strip())
+            text = path.read_text().strip()
+            ts = utc_to_ts(text) if "T" in text else float(text)
             age_days = (time.time() - ts) / 86400
             if age_days > self.env.get_config()["training_staleness_days"]:
                 return False
@@ -121,7 +133,8 @@ class CoinModel:
 
     def last_trained_ts(self) -> float:
         try:
-            return float(self.env.trainer_time_path(self.coin).read_text().strip())
+            text = self.env.trainer_time_path(self.coin).read_text().strip()
+            return utc_to_ts(text) if "T" in text else float(text)
         except (FileNotFoundError, ValueError):
             return 0.0
 
@@ -172,10 +185,10 @@ class AccountModel:
         return data or {}
 
     def trade_history(self, limit: int = 250) -> list[dict]:
-        return _read_jsonl(self.env.trade_history_path(self.exchange), limit)
+        return [_norm_ts(r) for r in _read_jsonl(self.env.trade_history_path(self.exchange), limit)]
 
     def account_value_history(self, limit: int = 500) -> list[dict]:
-        return _read_jsonl(self.env.account_history_path(self.exchange), limit)
+        return [_norm_ts(r) for r in _read_jsonl(self.env.account_history_path(self.exchange), limit)]
 
     def lth_holdings(self) -> dict[str, dict]:
         """Aggregate LTH holdings from trade history (tag='LTH' buys minus sells)."""
