@@ -438,6 +438,18 @@ async def api_save_config(data: dict):
         return {"ok": True}
     except ValueError as e:
         return {"ok": False, "error": str(e)}
+    except OSError as e:
+        import pt_errors
+        pt_errors.emit(
+            "pt_web", level="error",
+            message=f"Failed to save config: {e}",
+            detail=(
+                "The settings file could not be written. If running in Docker, "
+                "ensure pt_config.json is bind-mounted as a file (not a directory) "
+                "and that the host path is writable."
+            ),
+        )
+        return {"ok": False, "error": str(e)}
 
 
 # Legacy aliases so any cached browser tabs still work

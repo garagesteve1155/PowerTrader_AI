@@ -9,6 +9,7 @@ use get_config() for a cached, mtime-fresh snapshot and set_config() to write ch
 
 import json
 import os
+import shutil
 import threading
 from datetime import datetime, timezone as _tz
 from pathlib import Path
@@ -479,7 +480,9 @@ class PTEnv:
             try:
                 with open(tmp, "w", encoding="utf-8") as f:
                     json.dump(merged, f, indent=2)
-                tmp.rename(self.config_path)
+                # shutil.move handles cross-filesystem moves (e.g. Docker bind mounts)
+                # where os.rename / Path.rename raises OSError [Errno 16].
+                shutil.move(str(tmp), str(self.config_path))
             finally:
                 if tmp.exists():
                     try:
