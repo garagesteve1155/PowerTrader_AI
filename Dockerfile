@@ -23,9 +23,6 @@ RUN git clone https://github.com/swedishhh/PowerTrader_AI.git .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-# state/ (arcticdb OHLCV data, coin state) is managed by a named Docker volume
-VOLUME ["/app/state"]
-
 EXPOSE 8080
 
 COPY entrypoint.sh /entrypoint.sh

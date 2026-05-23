@@ -1,18 +1,13 @@
 services:
   powertrader:
-    image: powertrader:latest
+    image: swedishhh/powertrader:latest
     ports:
       - "8080:8080"
-    environment:
-      # Fill in your exchange API keys here.
-      # Only set the exchanges you use — others can be left blank.
-      KRAKEN_API_KEY: ""
-      KRAKEN_API_SECRET: ""
-      BINANCE_API_KEY: ""
-      BINANCE_API_SECRET: ""
-      KUCOIN_API_KEY: ""
-      KUCOIN_API_SECRET: ""
     volumes:
-      - ./state:/app/state
-      - ./pt_config.json:/app/pt_config.json
+      # All persistent data lives under POWERTRADER_ROOT on the host.
+      # Set POWERTRADER_ROOT in a .env file next to this docker-compose.yml.
+      # The directory must exist before first run (see DOCKER.md).
+      - ${POWERTRADER_ROOT}/state:/app/state
+      - ${POWERTRADER_ROOT}/pt_config.json:/app/pt_config.json
+      - ${POWERTRADER_ROOT}/exchange_api_keys.json:/app/exchange_api_keys.json
     restart: unless-stopped

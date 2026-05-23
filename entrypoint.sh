@@ -1,9 +1,23 @@
 #!/bin/bash
 set -e
 
-# Generate exchange_api_keys.json from environment variables.
-# Only includes an exchange if at least one key is set.
-python3 - <<'EOF'
+# --- pt_config.json ---
+# If the host file didn't exist, Docker creates a directory at the mount point.
+# Remove it so pt_env falls back to built-in defaults on first run.
+# On subsequent runs the UI writes a real file to the host path.
+if [ -d /app/pt_config.json ]; then
+    rm -rf /app/pt_config.json
+fi
+
+# --- exchange_api_keys.json ---
+# If the host file didn't exist, Docker creates a directory at the mount point.
+# Also allow env-var fallback for deployments that don't bind-mount the file.
+if [ -d /app/exchange_api_keys.json ]; then
+    rm -rf /app/exchange_api_keys.json
+fi
+
+if [ ! -s /app/exchange_api_keys.json ]; then
+    python3 - <<'EOF'
 import os, json
 
 exchanges = ["kraken", "binance", "robinhood", "kucoin"]
@@ -18,9 +32,10 @@ with open("/app/exchange_api_keys.json", "w") as f:
     json.dump(keys, f, indent=2)
 
 if keys:
-    print(f"[entrypoint] wrote exchange_api_keys.json for: {', '.join(keys)}")
+    print(f"[entrypoint] generated exchange_api_keys.json for: {', '.join(keys)}")
 else:
-    print("[entrypoint] warning: no exchange API keys set — running in demo mode only")
+    print("[entrypoint] no API keys found — starting in demo mode")
 EOF
+fi
 
 exec python3 pt_web.py "$@"
