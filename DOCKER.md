@@ -1,220 +1,198 @@
 # PowerTrader AI — Docker Installation Guide
 
-Docker Hub: [swedishhh/powertrader](https://hub.docker.com/repository/docker/swedishhh/powertrader)
+No terminal required. Everything is done through the Docker Desktop app.
 
 ---
 
-## Prerequisites
+## Step 1 — Install Docker Desktop
 
-| Platform | Install |
-|----------|---------|
-| **Mac** | [Docker Desktop for Mac](https://docs.docker.com/desktop/install/mac-install/) |
-| **Linux** | [Docker Engine](https://docs.docker.com/engine/install/) + [Docker Compose plugin](https://docs.docker.com/compose/install/) |
-| **Windows** | [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/) (WSL2 backend required) |
+Download and install Docker Desktop for your platform:
 
----
+- **Mac:** https://docs.docker.com/desktop/install/mac-install/
+- **Windows:** https://docs.docker.com/desktop/install/windows-install/
+- **Linux:** https://docs.docker.com/desktop/install/linux/
 
-## Quick Install (Mac / Linux)
-
-```bash
-# 1. Create your data directory
-mkdir -p ~/powertrader
-
-# 2. Create empty config (UI will populate it on first run)
-touch ~/powertrader/pt_config.json
-
-# 3. Create API keys file from the template below
-touch ~/powertrader/exchange_api_keys.json
-
-# 4. Download the compose file
-curl -o docker-compose.yml \
-  https://raw.githubusercontent.com/swedishhh/PowerTrader_AI/main/docker-compose.yml
-
-# 5. Create .env pointing at your data directory
-echo "POWERTRADER_ROOT=$HOME/powertrader" > .env
-
-# 6. Pull the image and start
-docker compose pull
-docker compose up -d
-
-# 7. Open the UI
-open http://localhost:8080      # Mac
-xdg-open http://localhost:8080  # Linux
-```
+Open Docker Desktop and wait for it to finish starting (the whale icon in the menu bar / taskbar turns solid when ready).
 
 ---
 
-## Quick Install (Windows)
+## Step 2 — Pull the PowerTrader Image
 
-Open **PowerShell**:
-
-```powershell
-# 1. Create your data directory
-New-Item -ItemType Directory -Force "$env:USERPROFILE\powertrader"
-
-# 2. Create empty config and API keys files
-New-Item -ItemType File "$env:USERPROFILE\powertrader\pt_config.json"
-New-Item -ItemType File "$env:USERPROFILE\powertrader\exchange_api_keys.json"
-
-# 3. Download the compose file (save to a working folder, e.g. C:\powertrader-app)
-New-Item -ItemType Directory -Force C:\powertrader-app
-cd C:\powertrader-app
-Invoke-WebRequest `
-  -Uri https://raw.githubusercontent.com/swedishhh/PowerTrader_AI/main/docker-compose.yml `
-  -OutFile docker-compose.yml
-
-# 4. Create .env — use forward slashes in the path
-"POWERTRADER_ROOT=C:/Users/$env:USERNAME/powertrader" | Out-File -Encoding ascii .env
-
-# 5. Pull and start
-docker compose pull
-docker compose up -d
-```
-
-Open **http://localhost:8080** in your browser.
+1. In Docker Desktop, click **Images** in the left sidebar
+2. Click **Search images to run** (the search bar at the top)
+3. Type `swedishhh/powertrader` and press Enter
+4. Click **Pull** next to `swedishhh/powertrader`
+5. Wait for the download to complete — the image will appear in your Images list
 
 ---
 
-## Exchange API Keys
+## Step 3 — Create Your Data Folder
 
-Edit `exchange_api_keys.json` in your data directory. Only include the exchanges you use:
+Create a folder on your computer where PowerTrader will store all its data (trading history, settings, market data). This folder persists across app updates.
+
+**Mac:** Open Finder → Go to your home folder → New Folder → name it `powertrader`
+
+**Windows:** Open File Explorer → navigate to `Documents` → Right-click → New Folder → name it `powertrader`
+
+**Linux:** Create `/home/yourname/powertrader`
+
+Inside that folder, create two files using a text editor (TextEdit on Mac, Notepad on Windows):
+
+### `exchange_api_keys.json`
+
+This file holds your exchange API credentials. Create it with the following content, filling in your own keys. Only include the exchanges you use — delete the others:
 
 ```json
 {
   "kraken": {
-    "api_key": "YOUR_KRAKEN_KEY",
-    "api_secret": "YOUR_KRAKEN_SECRET"
+    "api_key": "YOUR_KRAKEN_API_KEY",
+    "api_secret": "YOUR_KRAKEN_API_SECRET"
   },
   "kucoin": {
-    "api_key": "YOUR_KUCOIN_KEY",
-    "api_secret": "YOUR_KUCOIN_SECRET"
+    "api_key": "YOUR_KUCOIN_API_KEY",
+    "api_secret": "YOUR_KUCOIN_API_SECRET"
+  },
+  "binance": {
+    "api_key": "YOUR_BINANCE_API_KEY",
+    "api_secret": "YOUR_BINANCE_API_SECRET"
   }
 }
 ```
 
-Restart the container after editing:
+> **Mac tip:** In TextEdit, go to **Format → Make Plain Text** before typing, then save with the exact filename `exchange_api_keys.json`. When saving, make sure the file type is not `.txt`.
 
-```bash
-docker compose restart
+> **Windows tip:** In Notepad, choose **Save As**, set **Save as type** to **All Files**, and name it `exchange_api_keys.json`.
+
+### `pt_config.json`
+
+Create a second file named `pt_config.json` containing just:
+
+```json
+{}
 ```
 
-If `exchange_api_keys.json` is empty or missing, PowerTrader starts in **demo mode** (no live exchange connection).
+This is where PowerTrader saves your settings. The app writes to it when you configure things through the web UI.
 
 ---
 
-## Data Directory Layout
+## Step 4 — Run the Container
 
-After first run, your data directory will look like this:
+1. In Docker Desktop, click **Images** in the left sidebar
+2. Find `swedishhh/powertrader` in the list
+3. Click the **▶ Run** button on the right
 
+A dialog box opens. Click **Optional settings** to expand it, then fill in:
+
+### Ports
+
+Enter `8080` in the **Host port** field (or any free port on your machine, e.g. `9090`). The container port is fixed by the image and does not need to be set.
+
+### Volumes
+
+Click **+** to add each of the following three volume mounts. For each one, fill in the **Host path** (the path on your computer) and the **Container path** (fixed — always the value shown):
+
+| Host path | Container path |
+|-----------|---------------|
+| `/Users/yourname/powertrader/state` | `/app/state` |
+| `/Users/yourname/powertrader/exchange_api_keys.json` | `/app/exchange_api_keys.json` |
+| `/Users/yourname/powertrader/pt_config.json` | `/app/pt_config.json` |
+
+**Paths by platform:**
+
+*Mac — replace `yourname` with your Mac username:*
 ```
-~/powertrader/
-├── exchange_api_keys.json   ← your API credentials (never commit this)
-├── pt_config.json           ← settings saved from the UI
-└── state/
-    ├── hub_data/            ← trade history, account history, thinker state
-    ├── coins/               ← per-coin neural model outputs
-    └── historic_data/       ← OHLCV data (ArcticDB)
+/Users/yourname/powertrader/state
+/Users/yourname/powertrader/exchange_api_keys.json
+/Users/yourname/powertrader/pt_config.json
 ```
+
+*Windows — replace `yourname` with your Windows username:*
+```
+C:\Users\yourname\powertrader\state
+C:\Users\yourname\powertrader\exchange_api_keys.json
+C:\Users\yourname\powertrader\pt_config.json
+```
+
+*Linux:*
+```
+/home/yourname/powertrader/state
+/home/yourname/powertrader/exchange_api_keys.json
+/home/yourname/powertrader/pt_config.json
+```
+
+> **Tip:** Some versions of Docker Desktop have a **Browse** button next to the host path field. Use it to navigate to the folder/file instead of typing the path.
+
+### Container name (optional)
+
+Give it a memorable name like `powertrader` so it is easy to find later.
+
+4. Click **Run**
 
 ---
 
-## Starting and Stopping
+## Step 5 — Open the App
 
-**Command line:**
-```bash
-docker compose up -d      # start in background
-docker compose down       # stop
-docker compose restart    # restart after config changes
-docker compose logs -f    # follow logs
-```
+Once the container is running:
 
-**Docker Desktop app (Mac / Windows):**
+- In Docker Desktop → **Containers**, find `powertrader`
+- Click the **8080:8080** port link — it opens `http://localhost:8080` in your browser
+- Or just open your browser and go to **http://localhost:8080**
 
-After running `docker compose up -d` once from the terminal, the stack appears in Docker Desktop and can be managed entirely from the GUI from that point on.
+---
 
-1. Open **Docker Desktop**
-2. Click **Containers** in the left sidebar
-3. You will see a `powertrader-ai` group (or the folder name containing `docker-compose.yml`)
-4. Expand it to see the `powertrader` container
+## Managing the Container
 
-From there you can:
+Everything is done from **Docker Desktop → Containers**:
 
 | Action | How |
 |--------|-----|
-| Start / Stop | Click the ▶ / ■ button next to the container |
-| View logs | Click the container name → **Logs** tab |
-| Open the UI | Click the port link **8080:8080** — opens `http://localhost:8080` |
-| Open a terminal inside the container | Click the container name → **Terminal** tab |
-| Restart | Stop then Start, or use the ↺ button |
-
-To **update** to a new image without the terminal:
-
-1. Docker Desktop → **Images** tab
-2. Find `swedishhh/powertrader` → click **Pull** to fetch the latest
-3. Go back to **Containers**, stop the container, then start it again — it will use the new image
+| **Start** | Click ▶ |
+| **Stop** | Click ■ |
+| **Restart** | Stop then Start |
+| **View logs** | Click the container name → **Logs** tab |
+| **Open terminal inside** | Click the container name → **Terminal** tab |
 
 ---
 
-## Updating
+## Updating to a New Version
 
-```bash
-docker compose pull       # fetch the latest image
-docker compose up -d      # restart with new image (data directory unchanged)
-```
+1. Docker Desktop → **Images** → find `swedishhh/powertrader` → click **Pull** to fetch the latest
+2. Go to **Containers** → Stop the `powertrader` container
+3. Delete the stopped container (click the bin icon) — *your data folder is untouched*
+4. Go back to **Images** → click **▶ Run** on `swedishhh/powertrader` → fill in the same port and volume settings as before → **Run**
 
----
-
-## Changing the Data Directory
-
-Edit `.env` and change `POWERTRADER_ROOT`, then restart:
-
-```bash
-# .env
-POWERTRADER_ROOT=/new/path/to/data
-```
-
-```bash
-docker compose down
-docker compose up -d
-```
+Your trading history, settings, and market data are all in your data folder and are not affected by updates.
 
 ---
 
 ## Troubleshooting
 
-**Port 8080 already in use**  
-Change the port in `docker-compose.yml`:
-```yaml
-ports:
-  - "9090:8080"   # access on http://localhost:9090
-```
+**The container starts but the UI won't load**
+Make sure port 8080 isn't used by another app. Choose a different host port (e.g. `9090`) and access the UI at `http://localhost:9090`.
 
-**Permission denied on Linux**  
-The container runs as root. If your data directory is owned by another user, make it world-writable or change ownership:
-```bash
-chmod -R 777 ~/powertrader
-```
+**The container shows "demo mode" even though I added API keys**
+Check that `exchange_api_keys.json` is valid JSON (no typos, all quotes matched). Restart the container after fixing it.
 
-**UI shows DEMO after adding API keys**  
-Make sure `exchange_api_keys.json` is valid JSON and restart the container.
+**I see errors about missing files**
+Make sure the host paths for all three volumes exist before starting the container. The `state` path is a folder — if it doesn't exist yet, create it. The two `.json` files must exist as files (not folders) before you run.
+
+**Docker Desktop shows the container as "Exited"**
+Click the container name and check the Logs tab for the error message.
 
 ---
 
-## For Maintainers — Publishing to Docker Hub
+## Data Folder Reference
 
-Build and push a new image from the repo root:
+After first run your data folder will contain:
 
-```bash
-# Build (clones latest code from GitHub)
-docker build -t swedishhh/powertrader:latest .
-
-# Tag with version (optional)
-docker tag swedishhh/powertrader:latest swedishhh/powertrader:1.0.0
-
-# Push
-docker login
-docker push swedishhh/powertrader:latest
-docker push swedishhh/powertrader:1.0.0   # if tagged
+```
+powertrader/
+├── exchange_api_keys.json   ← your exchange API credentials
+├── pt_config.json           ← settings saved by the web UI
+└── state/
+    ├── hub_data/            ← trade history, account value history
+    ├── coins/               ← per-coin neural model data
+    └── historic_data/       ← OHLCV market data (large — do not delete)
 ```
 
-Users then get the update with `docker compose pull`.
+Back up the entire `powertrader/` folder to preserve your history and settings.
