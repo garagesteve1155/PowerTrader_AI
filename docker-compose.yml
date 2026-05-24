@@ -2,12 +2,15 @@ services:
   powertrader:
     image: swedishhh/powertrader:latest
     ports:
+      # Left side = port on YOUR machine. Change this if 8080 is already in use.
+      # Right side = port inside the container. Do not change this.
       - "8080:8080"
     volumes:
-      # All persistent data lives under POWERTRADER_ROOT on the host.
-      # Set POWERTRADER_ROOT in a .env file next to this docker-compose.yml.
-      # The directory must exist before first run (see DOCKER.md).
-      - ${POWERTRADER_ROOT}/state:/app/state
-      - ${POWERTRADER_ROOT}/pt_config.json:/app/pt_config.json
-      - ${POWERTRADER_ROOT}/exchange_api_keys.json:/app/exchange_api_keys.json
+      # Replace /Users/yourname/powertrader with the full path to your data folder.
+      # Mac:     /Users/yourname/powertrader
+      # Linux:   /home/yourname/powertrader
+      # Windows: C:/Users/yourname/powertrader
+      - /Users/yourname/powertrader/state:/app/state
+      - /Users/yourname/powertrader/pt_config.json:/app/pt_config.json
+      - /Users/yourname/powertrader/exchange_api_keys.json:/app/exchange_api_keys.json
     restart: unless-stopped
