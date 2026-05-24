@@ -43,11 +43,24 @@ Create this file containing just `{}`. The app writes your settings here when yo
 
 ---
 
-## 3. Edit `docker-compose.yml`
+## 3. Download and Edit `docker-compose.yml`
 
-Download `docker-compose.yml` from the repo and open it in a text editor.
+`docker-compose.yml` is the single configuration file that tells Docker where your data folder is and which port to use. You only need to edit it once.
 
-Replace `/Users/yourname/powertrader` (three places) with the actual path to your data folder.
+**Mac / Linux** — open Terminal:
+```bash
+curl -o docker-compose.yml https://raw.githubusercontent.com/swedishhh/PowerTrader_AI/main/docker-compose.yml
+```
+
+**Windows** — open PowerShell:
+```powershell
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/swedishhh/PowerTrader_AI/main/docker-compose.yml -OutFile docker-compose.yml
+```
+
+Open `docker-compose.yml` in a text editor and:
+
+- Replace `/Users/yourname/powertrader` **(three places)** with the full path to your data folder
+- Change `8080` on the left side of the port line if that port is already in use on your machine
 
 ---
 
@@ -55,9 +68,14 @@ Replace `/Users/yourname/powertrader` (three places) with the actual path to you
 
 Open a terminal in the folder containing `docker-compose.yml` and run:
 
+**Mac / Linux:**
 ```bash
-docker compose pull
-docker compose up -d
+docker compose pull && docker compose up -d
+```
+
+**Windows (PowerShell):**
+```powershell
+docker compose pull; docker compose up -d
 ```
 
 Then open **http://localhost:8080** in your browser.
@@ -72,9 +90,16 @@ In Docker Desktop → **Containers** you can start, stop, view logs, and open th
 
 ## Updating
 
+Run the same one-liner from the folder containing `docker-compose.yml`:
+
+**Mac / Linux:**
 ```bash
-docker compose pull
-docker compose up -d
+docker compose pull && docker compose up -d
+```
+
+**Windows (PowerShell):**
+```powershell
+docker compose pull; docker compose up -d
 ```
 
 Your data folder is never touched by updates.
