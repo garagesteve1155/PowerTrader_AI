@@ -2254,7 +2254,7 @@ class CryptoAPITrading:
         except Exception as e:
             log.warning(f"could not save pending buy order for {symbol}: {e}")
 
-        result = self.exchange.place_buy(symbol, amount_in_usd)
+        result = self.exchange.place_buy(symbol, amount_in_usd, tag=tag)
 
         # Clear placeholder pending (real order_id comes from result)
         try:

@@ -185,7 +185,7 @@ class KrakenExchange(Exchange):
     # Order placement
     # ------------------------------------------------------------------
 
-    def place_buy(self, symbol: str, amount_usd: float) -> Optional[OrderResult]:
+    def place_buy(self, symbol: str, amount_usd: float, tag: Optional[str] = None) -> Optional[OrderResult]:
         exchange_sym = self.to_exchange_symbol(symbol)
 
         buy_prices, _, _ = self.get_price([symbol])

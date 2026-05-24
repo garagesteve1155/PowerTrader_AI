@@ -50,7 +50,7 @@ class BinanceExchange(Exchange):
     def get_price(self, symbols: List[str]) -> Tuple[Dict[str, float], Dict[str, float], List[str]]:
         raise NotImplementedError("Binance adapter not yet implemented")
 
-    def place_buy(self, symbol: str, amount_usd: float) -> Optional[OrderResult]:
+    def place_buy(self, symbol: str, amount_usd: float, tag: Optional[str] = None) -> Optional[OrderResult]:
         raise NotImplementedError("Binance adapter not yet implemented")
 
     def place_sell(self, symbol: str, qty: float) -> Optional[OrderResult]:

@@ -93,7 +93,7 @@ class Exchange(ABC):
         """
 
     @abstractmethod
-    def place_buy(self, symbol: str, amount_usd: float) -> Optional[OrderResult]:
+    def place_buy(self, symbol: str, amount_usd: float, tag: Optional[str] = None) -> Optional[OrderResult]:
         """
         Place a market buy for ~amount_usd worth of symbol (canonical format).
         Block until terminal. Return OrderResult or None on total failure.

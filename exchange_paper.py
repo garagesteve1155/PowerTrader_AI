@@ -156,7 +156,7 @@ class PaperExchange(Exchange):
 
         return buy_prices, sell_prices, valid
 
-    def place_buy(self, symbol: str, amount_usd: float) -> Optional[OrderResult]:
+    def place_buy(self, symbol: str, amount_usd: float, tag: Optional[str] = None) -> Optional[OrderResult]:
         base = self.base_from_canonical(symbol)
         price = self._get_price(base)
         if not price or price <= 0:
@@ -402,9 +402,9 @@ class ShadowedExchange(Exchange):
     # Mirrored trade operations
     # ------------------------------------------------------------------
 
-    def place_buy(self, symbol: str, amount_usd: float) -> Optional[OrderResult]:
-        result = self._real.place_buy(symbol, amount_usd)
-        if result:
+    def place_buy(self, symbol: str, amount_usd: float, tag: Optional[str] = None) -> Optional[OrderResult]:
+        result = self._real.place_buy(symbol, amount_usd, tag=tag)
+        if result and str(tag or "").upper() != "LTH":
             try:
                 notional = (
                     result.notional_usd
