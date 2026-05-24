@@ -107,35 +107,46 @@ class CoinModel:
         return _cache.get(self.env.short_signal_path(self.coin), _read_int)
 
     def long_price_levels(self) -> list[float]:
-        return _cache.get(self.env.low_bound_path(self.coin), _read_float_list)
+        data = _cache.get(self.env.thinker_state_path(self.coin), _read_json)
+        return list(data.get("low_bound_prices", [])) if data else []
 
     def short_price_levels(self) -> list[float]:
-        return _cache.get(self.env.high_bound_path(self.coin), _read_float_list)
+        data = _cache.get(self.env.thinker_state_path(self.coin), _read_json)
+        return list(data.get("high_bound_prices", [])) if data else []
 
     def training_status(self) -> dict:
-        data = _cache.get(self.env.trainer_status_path(self.coin), _read_json)
+        data = _cache.get(self.env.trainer_state_path(self.coin), _read_json)
         return data or {"coin": self.coin, "state": "UNKNOWN"}
 
     def training_failure(self) -> dict | None:
-        return _cache.get(self.env.trainer_failure_path(self.coin), _read_json)
+        data = _cache.get(self.env.trainer_state_path(self.coin), _read_json)
+        if not data:
+            return None
+        failure = data.get("failure", {})
+        return failure if failure else None
 
     def is_trained(self) -> bool:
-        path = self.env.trainer_time_path(self.coin)
+        data = _cache.get(self.env.trainer_state_path(self.coin), _read_json)
+        if not data:
+            return False
+        raw = data.get("last_training_time", "")
         try:
-            text = path.read_text().strip()
-            ts = utc_to_ts(text) if "T" in text else float(text)
+            ts = utc_to_ts(raw) if "T" in raw else float(raw)
             age_days = (time.time() - ts) / 86400
             if age_days > self.env.get_config()["training_staleness_days"]:
                 return False
-        except (FileNotFoundError, ValueError):
+        except (ValueError, TypeError):
             return False
-        return any(self.env.coin_dir(self.coin).glob("memories_*.txt"))
+        return (self.env.training_data_path(self.coin)).exists()
 
     def last_trained_ts(self) -> float:
+        data = _cache.get(self.env.trainer_state_path(self.coin), _read_json)
+        if not data:
+            return 0.0
+        raw = data.get("last_training_time", "")
         try:
-            text = self.env.trainer_time_path(self.coin).read_text().strip()
-            return utc_to_ts(text) if "T" in text else float(text)
-        except (FileNotFoundError, ValueError):
+            return utc_to_ts(raw) if "T" in raw else float(raw)
+        except (ValueError, TypeError):
             return 0.0
 
     def snapshot(self) -> dict:

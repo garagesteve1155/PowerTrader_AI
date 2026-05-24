@@ -7,15 +7,15 @@ Continuously cycles through every active coin, scoring each against its trained
 neural memories across 11 timeframes (1min … 1week).  The score for a given
 timeframe is the average normalised "diff" between the memory bank and the
 current candle sequence.  When that diff falls at or below the adaptive
-threshold (neural_perfect_threshold_<tf>.txt) the timeframe votes "long";
-above it votes "short".  After a full sweep of all timeframes the votes are
-summed into per-coin signals that the trader acts on.
+threshold the timeframe votes "long"; above it votes "short".  After a full
+sweep of all timeframes the votes are summed into per-coin signals that the
+trader acts on.
 
 ALGORITHM (per coin, per timeframe)
 ------------------------------------
 1. Fetch the most recent candles from KuCoin live API.
-2. Load the memory bank (memories_<tf>.json) and per-memory weights
-   (weights_<tf>.json) written by pt_trainer.py.
+2. Load the memory bank and per-memory weights from training_data.json
+   written by pt_trainer.py.
 3. Compute the weighted mean absolute difference between the memory
    sequences and the latest candles.
 4. Compare diff_avg to the persisted threshold; classify as long/short.
@@ -28,24 +28,20 @@ COMMUNICATION LINKS
 Reads (inputs):
   pt_config.json              — coin list, LTH coins, thinker_dir
   state/coins/<SYM>/
-    memories_<tf>.json           — memory bank (written by pt_trainer.py)
-    weights_<tf>.json            — per-memory weights (written by pt_trainer.py)
-    neural_perfect_threshold_<tf>.txt  — adaptive decision threshold (r/w)
-    trainer_last_training_time.txt     — freshness gate (written by pt_trainer.py)
+    training_data.json        — memory bank + weights + thresholds (written by pt_trainer.py)
+    trainer_state.json        — freshness gate (written by pt_trainer.py)
+    thinker_state.json        — own persisted state (r/w)
 
 Writes (outputs consumed by pt_trader.py):
   state/coins/<SYM>/
-    long_dca_signal.txt          — integer: number of long-voting timeframes
-    short_dca_signal.txt         — integer: number of short-voting timeframes
-    futures_long_profit_margin.txt   — float: mean profit-margin for longs
-    futures_short_profit_margin.txt  — float: mean profit-margin for shorts
-    low_bound_prices.html        — space-separated predicted buy price levels
-    high_bound_prices.html       — space-separated predicted sell price levels
+    long_dca_signal.txt       — integer: number of long-voting timeframes
+    short_dca_signal.txt      — integer: number of short-voting timeframes
+    thinker_state.json        — bound prices + thresholds + full coin state
 
   state/hub_data/
-    thinker_ready.json           — readiness status polled by pt_web.py / UI
-    lth_daily_ema200.json        — 200-day EMA snapshots for LTH coins (read
-                                   by pt_trader.py for LTH buy gating)
+    thinker_ready.json        — readiness status polled by pt_web.py / UI
+    lth_daily_ema200.json     — 200-day EMA snapshots for LTH coins (read
+                                by pt_trader.py for LTH buy gating)
 """
 
 import json
@@ -264,12 +260,15 @@ def _mem_field_pct(line: str, idx: int) -> float:
 def _coin_is_trained(sym: str) -> bool:
     try:
         folder = coin_folder(sym)
-        stamp_path = os.path.join(folder, "trainer_last_training_time.txt")
-        if not os.path.isfile(stamp_path):
+        path = os.path.join(folder, "trainer_state.json")
+        if not os.path.isfile(path):
             return False
-        with open(stamp_path, "r", encoding="utf-8") as f:
-            raw = (f.read() or "").strip()
-        ts = (utc_to_ts(raw) if "T" in raw else float(raw)) if raw else 0.0
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        raw = data.get("last_training_time", "")
+        if not raw:
+            return False
+        ts = utc_to_ts(raw) if "T" in raw else float(raw)
         if ts <= 0:
             return False
         stale_secs = _env.get_config()["training_staleness_days"] * 86400
@@ -477,16 +476,6 @@ def init_coin(sym: str):
     # switch into the coin's folder so ALL existing relative file I/O stays working
     os.chdir(coin_folder(sym))
 
-    # per-coin "version" + on/off files (no collisions between coins)
-    with open("alerts_version.txt", "w+") as f:
-        f.write("5/3/2022/9am")
-
-    with open("futures_long_onoff.txt", "w+") as f:
-        f.write("OFF")
-
-    with open("futures_short_onoff.txt", "w+") as f:
-        f.write("OFF")
-
     saved = _load_coin_state(sym)
     if saved is not None:
         states[sym] = saved
@@ -548,11 +537,7 @@ def step_coin(sym: str):
     # skip this coin so no new trades can start until it is trained again.
     if not _coin_is_trained(sym):
         try:
-            # Prevent new trades (and DCA) by forcing signals to 0 and keeping PM at baseline.
-            with open("futures_long_profit_margin.txt", "w+") as f:
-                f.write("0.25")
-            with open("futures_short_profit_margin.txt", "w+") as f:
-                f.write("0.25")
+            # Prevent new trades (and DCA) by forcing signals to 0.
             with open("long_dca_signal.txt", "w+") as f:
                 f.write("0")
             with open("short_dca_signal.txt", "w+") as f:
@@ -645,27 +630,33 @@ def step_coin(sym: str):
 
     # ====== ORIGINAL: load threshold + memories/weights and compute moves ======
     try:
-        file = open(
-            "neural_perfect_threshold_" + tf_choices[tf_choice_index] + ".txt", "r"
-        )
-        perfect_threshold = float(file.read())
-        file.close()
-    except (FileNotFoundError, ValueError):
+        with open("training_data.json", "r", encoding="utf-8") as f:
+            _td_all = json.load(f)
+        _td = _td_all.get(tf_choices[tf_choice_index], {})
+        perfect_threshold = float(_td.get("threshold", 1.0))
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        _td_all = {}
+        _td = {}
         perfect_threshold = 1.0
 
+    # Use persisted threshold if available (continues adaptation across restarts).
+    # Cleared from thinker_state.json by the controller before each training run,
+    # so after retraining the fresh value from training_data.json is used instead.
     try:
-        # If we can read/parse training files, this timeframe is NOT a training-file issue.
+        if tf_choices[tf_choice_index] in st.get("thresholds", {}):
+            perfect_threshold = float(st["thresholds"][tf_choices[tf_choice_index]])
+    except Exception:
+        pass
+
+    try:
+        # If we can read/parse training data, this timeframe is NOT a training-file issue.
         training_issues[tf_choice_index] = 0
 
         tf = tf_choices[tf_choice_index]
-        with open("memories_" + tf + ".txt", "r") as f:
-            memory_list = _strip_noise(f.read()).split("~")
-        with open("memory_weights_" + tf + ".txt", "r") as f:
-            weight_list = _strip_noise(f.read()).split(" ")
-        with open("memory_weights_high_" + tf + ".txt", "r") as f:
-            high_weight_list = _strip_noise(f.read()).split(" ")
-        with open("memory_weights_low_" + tf + ".txt", "r") as f:
-            low_weight_list = _strip_noise(f.read()).split(" ")
+        memory_list = _strip_noise(_td.get("memories", "")).split("~")
+        weight_list = _strip_noise(_td.get("weights", "")).split(" ")
+        high_weight_list = _strip_noise(_td.get("weights_high", "")).split(" ")
+        low_weight_list = _strip_noise(_td.get("weights_low", "")).split(" ")
 
         mem_ind = 0
         diffs_list = []
@@ -774,12 +765,10 @@ def step_coin(sym: str):
         del perfects[tf_choice_index]
         perfects.insert(tf_choice_index, "inactive")
 
-    # keep threshold persisted (original behavior)
-    file = open(
-        "neural_perfect_threshold_" + tf_choices[tf_choice_index] + ".txt", "w+"
-    )
-    file.write(str(perfect_threshold))
-    file.close()
+    # persist adapted threshold (written to thinker_state.json each cycle via st)
+    if "thresholds" not in st:
+        st["thresholds"] = {}
+    st["thresholds"][tf_choices[tf_choice_index]] = perfect_threshold
 
     # ====== ORIGINAL: compute new high/low predictions ======
     price_list2 = [openPrice, closePrice]
@@ -1156,22 +1145,7 @@ def step_coin(sym: str):
         # bump bounds_version now that we've computed a new set of prediction bounds
         st["bounds_version"] = bounds_version_used_for_messages + 1
 
-        with open("low_bound_prices.html", "w+") as file:
-            file.write(
-                str(new_low_bound_prices)
-                .replace("', '", " ")
-                .replace("[", "")
-                .replace("]", "")
-                .replace("'", "")
-            )
-        with open("high_bound_prices.html", "w+") as file:
-            file.write(
-                str(new_high_bound_prices)
-                .replace("', '", " ")
-                .replace("[", "")
-                .replace("]", "")
-                .replace("'", "")
-            )
+        # bound prices are persisted in thinker_state.json (low_bound_prices / high_bound_prices)
 
         # cache display text for this coin (main loop prints everything on one screen)
         try:
@@ -1213,39 +1187,14 @@ def step_coin(sym: str):
         except Exception:
             log.exception("ready-check error")
 
-        # write PM + DCA signals (same as before)
+        # write DCA signals
         try:
             longs = tf_sides.count("long")
             shorts = tf_sides.count("short")
-
-            # long pm
-            current_pms = [m for m in margins if m != 0]
-            try:
-                pm = sum(current_pms) / len(current_pms)
-                if pm < 0.25:
-                    pm = 0.25
-            except Exception:
-                pm = 0.25
-
-            with open("futures_long_profit_margin.txt", "w+") as f:
-                f.write(str(pm))
             with open("long_dca_signal.txt", "w+") as f:
                 f.write(str(longs))
-
-            # short pm
-            current_pms = [m for m in margins if m != 0]
-            try:
-                pm = sum(current_pms) / len(current_pms)
-                if pm < 0.25:
-                    pm = 0.25
-            except Exception:
-                pm = 0.25
-
-            with open("futures_short_profit_margin.txt", "w+") as f:
-                f.write(str(abs(pm)))
             with open("short_dca_signal.txt", "w+") as f:
                 f.write(str(shorts))
-
         except Exception:
             log.exception("signal write error")
 

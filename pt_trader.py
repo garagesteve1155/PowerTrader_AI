@@ -1965,45 +1965,14 @@ class CryptoAPITrading:
 
     @staticmethod
     def _read_long_price_levels(symbol: str) -> list:
-        """
-        Reads low_bound_prices.html from the per-coin folder and returns a list of LONG (blue) price levels.
-
-        Returned ordering is highest->lowest so:
-          N1 = 1st blue line (top)
-          ...
-          N7 = 7th blue line (bottom)
-        """
+        """Read LONG (buy) price levels from thinker_state.json, sorted highest->lowest (N1..N7)."""
         sym = str(symbol).upper().strip()
-        folder = str(_pt_env.coin_dir(sym))
-        path = os.path.join(folder, "low_bound_prices.html")
+        path = os.path.join(str(_pt_env.coin_dir(sym)), "thinker_state.json")
         try:
             with open(path, "r", encoding="utf-8") as f:
-                raw = (f.read() or "").strip()
-            if not raw:
-                return []
-
-            # Normalize common formats: python-list, comma-separated, newline-separated
-            raw = raw.strip().strip("[]()")
-            raw = raw.replace(",", " ").replace(";", " ").replace("|", " ")
-            raw = raw.replace("\n", " ").replace("\t", " ")
-            parts = [p for p in raw.split() if p]
-
-            vals = []
-            for p in parts:
-                try:
-                    vals.append(float(p))
-                except Exception:
-                    continue
-
-            # De-dupe, then sort high->low for stable N1..N7 mapping
-            out = []
-            seen = set()
-            for v in vals:
-                k = round(float(v), 12)
-                if k in seen:
-                    continue
-                seen.add(k)
-                out.append(float(v))
+                data = json.load(f)
+            vals = [float(v) for v in data.get("low_bound_prices", []) if v is not None]
+            out = list({round(v, 12): v for v in vals}.values())
             out.sort(reverse=True)
             return out
         except Exception:

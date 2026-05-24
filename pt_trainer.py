@@ -276,15 +276,7 @@ class InsufficientDataError(Exception):
 
 @dataclass
 class MemoryStore:
-    """Manages memory patterns and weights for one timeframe.
-
-    File format (memories_{tf}.txt):
-        Entries separated by '~'. Each entry:
-        '<pct_change_1> <pct_change_2> ... <outcome_pct>{}<high_pct*100>{}<low_pct*100>'
-
-    Weight files (memory_weights_{tf}.txt, memory_weights_high_{tf}.txt, memory_weights_low_{tf}.txt):
-        Space-separated float values, one per memory entry.
-    """
+    """Manages memory patterns and weights for one timeframe, backed by training_data.json."""
 
     tf_name: str
     patterns: list = field(
@@ -300,17 +292,16 @@ class MemoryStore:
     dirty: bool = False
 
     def load(self):
-        """Load from disk. Tolerates missing files (starts empty)."""
-        self.patterns, self.high_pcts, self.low_pcts = self._load_memories()
-        self.weights = self._load_weight_file(f"memory_weights_{self.tf_name}.txt")
-        self.high_weights = self._load_weight_file(
-            f"memory_weights_high_{self.tf_name}.txt"
-        )
-        self.low_weights = self._load_weight_file(
-            f"memory_weights_low_{self.tf_name}.txt"
-        )
+        """Load from disk. Tolerates missing file (starts empty)."""
+        td = _read_training_data()
+        tf_data = td.get(self.tf_name, {})
 
-        # Ensure all lists are same length (pad if needed)
+        memories_blob = tf_data.get("memories", "")
+        self.patterns, self.high_pcts, self.low_pcts = self._parse_memories(memories_blob)
+        self.weights = self._parse_weights(tf_data.get("weights", ""))
+        self.high_weights = self._parse_weights(tf_data.get("weights_high", ""))
+        self.low_weights = self._parse_weights(tf_data.get("weights_low", ""))
+
         n = len(self.patterns)
         for wlist in (self.weights, self.high_weights, self.low_weights):
             while len(wlist) < n:
@@ -318,22 +309,13 @@ class MemoryStore:
 
         self.dirty = False
 
-    def _load_memories(self) -> tuple:
-        """Parse memories file into structured lists."""
-        path = f"memories_{self.tf_name}.txt"
-        if not os.path.isfile(path):
+    def _parse_memories(self, blob: str) -> tuple:
+        if not blob.strip():
             return [], [], []
-
-        text = _read_file(path)
-        if not text.strip():
-            return [], [], []
-
-        entries = text.split("~")
         patterns = []
         high_pcts = []
         low_pcts = []
-
-        for entry in entries:
+        for entry in blob.split("~"):
             entry = entry.strip()
             if not entry:
                 continue
@@ -341,9 +323,7 @@ class MemoryStore:
             if len(parts) < 3:
                 continue
             try:
-                # Pattern values are space-separated floats (last value is the outcome)
-                pattern_str = parts[0].strip()
-                vals = [float(x) for x in pattern_str.split() if x.strip()]
+                vals = [float(x) for x in parts[0].strip().split() if x.strip()]
                 if not vals:
                     continue
                 patterns.append(np.array(vals, dtype=np.float64))
@@ -351,52 +331,40 @@ class MemoryStore:
                 low_pcts.append(float(parts[2].strip()) / 100.0)
             except (ValueError, IndexError):
                 continue
-
         return patterns, high_pcts, low_pcts
 
-    def _load_weight_file(self, path: str) -> list:
-        """Load space-separated weight values."""
-        if not os.path.isfile(path):
-            return []
-        text = _read_file(path)
-        if not text.strip():
+    def _parse_weights(self, blob: str) -> list:
+        if not blob.strip():
             return []
         values = []
-        for x in text.split():
-            x = x.strip()
-            if x:
-                try:
-                    values.append(float(x))
-                except ValueError:
-                    continue
+        for x in blob.split():
+            try:
+                values.append(float(x))
+            except ValueError:
+                continue
         return values
 
     def flush(self):
-        """Write all data back to disk in the original format."""
+        """Write all data back to training_data.json."""
         if not self.dirty:
             return
 
-        # Write memories
         entries = []
         for i, pat in enumerate(self.patterns):
             pattern_str = " ".join(str(v) for v in pat)
-            high_str = str(self.high_pcts[i] * 100.0)
-            low_str = str(self.low_pcts[i] * 100.0)
-            entries.append(f"{pattern_str}{{}}{high_str}{{}}{low_str}")
+            entries.append(
+                f"{pattern_str}{{}}{self.high_pcts[i] * 100.0}{{}}{self.low_pcts[i] * 100.0}"
+            )
 
-        _write_file(f"memories_{self.tf_name}.txt", "~".join(entries))
-        _write_file(
-            f"memory_weights_{self.tf_name}.txt",
-            " ".join(str(w) for w in self.weights),
-        )
-        _write_file(
-            f"memory_weights_high_{self.tf_name}.txt",
-            " ".join(str(w) for w in self.high_weights),
-        )
-        _write_file(
-            f"memory_weights_low_{self.tf_name}.txt",
-            " ".join(str(w) for w in self.low_weights),
-        )
+        td = _read_training_data()
+        td[self.tf_name] = {
+            "memories": "~".join(entries),
+            "weights": " ".join(str(w) for w in self.weights),
+            "weights_high": " ".join(str(w) for w in self.high_weights),
+            "weights_low": " ".join(str(w) for w in self.low_weights),
+            "threshold": td.get(self.tf_name, {}).get("threshold", 1.0),
+        }
+        _write_training_data(td)
         self.dirty = False
 
     def add_entry(self, pattern: np.ndarray, high_pct: float, low_pct: float):
@@ -564,77 +532,58 @@ class AccuracyTracker:
 
 
 class StatusWriter:
-    """Writes trainer status files compatible with the hub GUI."""
+    """Writes trainer_state.json for the hub GUI and thinker freshness gate."""
 
     def __init__(self, coin: str):
         self.coin = coin
         self.started_at = utcnow()
 
     def write_training(self):
-        self._write_json(
-            "trainer_status.json",
-            {
-                "coin": self.coin,
-                "state": "TRAINING",
-                "started_at": self.started_at,
-                "timestamp": self.started_at,
-            },
-        )
-        self._write_json("trainer_failure_info.json", {})
+        _write_trainer_state({
+            "coin": self.coin,
+            "state": "TRAINING",
+            "started_at": self.started_at,
+            "timestamp": self.started_at,
+            "failure": {},
+        })
 
     def write_finished(self):
         finished_at = utcnow()
-        self._write_json(
-            "trainer_status.json",
-            {
-                "coin": self.coin,
-                "state": "FINISHED",
-                "started_at": self.started_at,
-                "finished_at": finished_at,
-                "timestamp": finished_at,
-            },
-        )
-        _write_file("trainer_last_training_time.txt", finished_at)
-        _write_file("trainer_last_start_time.txt", self.started_at)
+        _write_trainer_state({
+            "coin": self.coin,
+            "state": "FINISHED",
+            "started_at": self.started_at,
+            "finished_at": finished_at,
+            "timestamp": finished_at,
+            "last_training_time": finished_at,
+            "failure": {},
+        })
 
     def write_failure(self, exc: BaseException, tb_str: str = ""):
         failed_at = utcnow()
-        error_msg = f"{type(exc).__name__}: {exc}"
-        self._write_json(
-            "trainer_status.json",
-            {
-                "coin": self.coin,
-                "state": "FAILED",
-                "started_at": self.started_at,
-                "failed_at": failed_at,
-                "timestamp": failed_at,
-                "error": error_msg,
-            },
-        )
-        self._write_json(
-            "trainer_failure_info.json",
-            {
-                "coin": self.coin,
-                "state": "FAILED",
+        _write_trainer_state({
+            "coin": self.coin,
+            "state": "FAILED",
+            "started_at": self.started_at,
+            "failed_at": failed_at,
+            "timestamp": failed_at,
+            "error": f"{type(exc).__name__}: {exc}",
+            "failure": {
                 "exception_type": type(exc).__name__,
                 "exception_message": str(exc),
                 "traceback": tb_str,
                 "timestamp": failed_at,
                 "started_at": self.started_at,
             },
-        )
-
-    def _write_json(self, path: str, data: dict):
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-        except Exception:
-            pass
+        })
 
 
 def write_threshold(tf_name: str, value: float):
-    """Write the adaptive threshold for the thinker to read."""
-    _write_file(f"neural_perfect_threshold_{tf_name}.txt", str(value))
+    """Persist the adaptive threshold into training_data.json."""
+    td = _read_training_data()
+    tf_data = td.setdefault(tf_name, {})
+    tf_data["threshold"] = value
+    _write_training_data(td)
 
 
 def should_stop() -> bool:
@@ -654,6 +603,28 @@ def _read_file(path: str) -> str:
 def _write_file(path: str, content: str):
     with open(path, "w+", encoding="utf-8") as f:
         f.write(content)
+
+
+def _read_training_data() -> dict:
+    try:
+        with open("training_data.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _write_training_data(data: dict):
+    tmp = "training_data.json.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    os.replace(tmp, "training_data.json")
+
+
+def _write_trainer_state(data: dict):
+    tmp = "trainer_state.json.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, "trainer_state.json")
 
 
 # ---------------------------------------------------------------------------
@@ -949,13 +920,11 @@ class TrainingLoop:
 
     def _load_threshold(self, tf_name: str) -> float:
         """Load the last threshold or default to 1.0."""
-        path = f"neural_perfect_threshold_{tf_name}.txt"
         try:
-            if os.path.isfile(path):
-                return float(_read_file(path).strip())
-        except (ValueError, OSError):
-            pass
-        return 1.0
+            td = _read_training_data()
+            return float(td.get(tf_name, {}).get("threshold", 1.0))
+        except (ValueError, TypeError):
+            return 1.0
 
     def _score_accuracy(
         self,

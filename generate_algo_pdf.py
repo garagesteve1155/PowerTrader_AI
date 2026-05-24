@@ -40,8 +40,8 @@ C_ORANGE_LINE = "#d29922"
 # ─── helpers ───────────────────────────────────────────────────────────────
 
 def load_memories(coin, tf):
-    path = os.path.join(COINS_DIR, coin, f"memories_{tf}.txt")
-    data = open(path).read()
+    td = _load_training_data(coin)
+    data = td.get(tf, {}).get("memories", "")
     entries = data.split("~")
     out = []
     for e in entries:
@@ -53,22 +53,26 @@ def load_memories(coin, tf):
         out.append({"pattern": pat_vals, "high": high, "low": low})
     return out
 
+def _load_training_data(coin):
+    path = os.path.join(COINS_DIR, coin, "training_data.json")
+    with open(path) as f:
+        return json.load(f)
+
 def load_weights(coin, tf, kind=""):
-    prefix = f"memory_weights_{kind}" if kind else "memory_weights_"
-    path = os.path.join(COINS_DIR, coin, f"{prefix}{tf}.txt")
-    raw = open(path).read().replace("'","").replace('"',"").replace(",","").replace("[","").replace("]","")
+    key = "weights_high" if kind == "high" else ("weights_low" if kind == "low" else "weights")
+    td = _load_training_data(coin)
+    raw = td.get(tf, {}).get(key, "")
     return [float(x) for x in raw.split() if x]
 
 def load_threshold(coin, tf):
-    path = os.path.join(COINS_DIR, coin, f"neural_perfect_threshold_{tf}.txt")
-    return float(open(path).read().strip())
+    td = _load_training_data(coin)
+    return float(td.get(tf, {}).get("threshold", 1.0))
 
 def load_bounds(coin):
-    lp = os.path.join(COINS_DIR, coin, "low_bound_prices.html")
-    hp = os.path.join(COINS_DIR, coin, "high_bound_prices.html")
-    low = [float(x) for x in open(lp).read().replace(",","").split() if x]
-    high = [float(x) for x in open(hp).read().replace(",","").split() if x]
-    return low, high
+    path = os.path.join(COINS_DIR, coin, "thinker_state.json")
+    with open(path) as f:
+        data = json.load(f)
+    return data.get("low_bound_prices", []), data.get("high_bound_prices", [])
 
 def save_fig(fig, prefix="chart"):
     path = os.path.join(tempfile.gettempdir(), f"pt_{prefix}.png")

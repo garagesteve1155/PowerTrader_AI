@@ -586,20 +586,14 @@ class PTEnv:
     def short_signal_path(self, coin: str) -> Path:
         return self.coin_dir(coin) / "short_dca_signal.txt"
 
-    def low_bound_path(self, coin: str) -> Path:
-        return self.coin_dir(coin) / "low_bound_prices.html"
+    def thinker_state_path(self, coin: str) -> Path:
+        return self.coin_dir(coin) / "thinker_state.json"
 
-    def high_bound_path(self, coin: str) -> Path:
-        return self.coin_dir(coin) / "high_bound_prices.html"
+    def training_data_path(self, coin: str) -> Path:
+        return self.coin_dir(coin) / "training_data.json"
 
-    def trainer_status_path(self, coin: str) -> Path:
-        return self.coin_dir(coin) / "trainer_status.json"
-
-    def trainer_failure_path(self, coin: str) -> Path:
-        return self.coin_dir(coin) / "trainer_failure_info.json"
-
-    def trainer_time_path(self, coin: str) -> Path:
-        return self.coin_dir(coin) / "trainer_last_training_time.txt"
+    def trainer_state_path(self, coin: str) -> Path:
+        return self.coin_dir(coin) / "trainer_state.json"
 
     def killer_path(self, coin: str) -> Path:
         return self.coin_dir(coin) / "killer.txt"

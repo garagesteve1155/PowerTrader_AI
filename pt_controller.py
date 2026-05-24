@@ -345,50 +345,47 @@ class ProcessController:
             if not trainer_path.is_file():
                 return False
 
-            patterns = [
-                "trainer_last_training_time.txt", "trainer_status.json",
-                "trainer_failure_info.json", "trainer_last_start_time.txt",
-                "killer.txt", "memories_*.txt", "memory_weights_*.txt",
-                "neural_perfect_threshold_*.txt",
-            ]
-            for pat in patterns:
-                for fp in glob.glob(str(coin_dir / pat)):
-                    try:
-                        os.remove(fp)
-                    except Exception:
-                        pass
+            for fname in ("trainer_state.json", "training_data.json", "killer.txt"):
+                fp = coin_dir / fname
+                try:
+                    fp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            # Clear cached thresholds from thinker state so the next thinker startup
+            # picks up fresh thresholds from the new training_data.json
+            _ts_path = coin_dir / "thinker_state.json"
+            try:
+                if _ts_path.exists():
+                    _ts = json.loads(_ts_path.read_text())
+                    _ts.pop("thresholds", None)
+                    _ts_path.write_text(json.dumps(_ts, indent=2))
+            except Exception:
+                pass
 
             handle = ProcHandle(name=f"Trainer-{coin}")
 
             def _on_trainer_exit(returncode, _coin=coin, _dir=coin_dir):
-                status_path = _dir / "trainer_status.json"
-                failure_path = _dir / "trainer_failure_info.json"
+                state_path = _dir / "trainer_state.json"
                 try:
-                    status = json.loads(status_path.read_text()) if status_path.exists() else {}
+                    status = json.loads(state_path.read_text()) if state_path.exists() else {}
                 except Exception:
                     status = {}
                 if status.get("state") == "TRAINING":
-                    has_failure = False
-                    try:
-                        fi = json.loads(failure_path.read_text()) if failure_path.exists() else {}
-                        has_failure = bool(fi.get("exception_type"))
-                    except Exception:
-                        pass
+                    has_failure = bool((status.get("failure") or {}).get("exception_type"))
                     if not has_failure:
-                        failure = {
+                        status["failure"] = {
                             "coin": _coin,
                             "state": "FAILED",
                             "exception_type": "ProcessDied",
                             "exception_message": f"Trainer exited with code {returncode} without reporting results",
                             "traceback": "",
-                            "trainer_state": {},
                             "timestamp": int(time.time()),
                             "started_at": status.get("started_at", 0),
                         }
-                        failure_path.write_text(json.dumps(failure, indent=2))
                     status["state"] = "FAILED"
                     status["timestamp"] = int(time.time())
-                    status_path.write_text(json.dumps(status))
+                    state_path.write_text(json.dumps(status, indent=2))
 
             ok = self._launch(
                 handle,
