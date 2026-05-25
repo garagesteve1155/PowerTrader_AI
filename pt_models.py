@@ -108,11 +108,13 @@ class CoinModel:
 
     def long_price_levels(self) -> list[float]:
         data = _cache.get(self.env.thinker_state_path(self.coin), _read_json)
-        return list(data.get("low_bound_prices", [])) if data else []
+        vals = [float(v) for v in data.get("low_bound_prices", []) if v] if data else []
+        return sorted(vals, reverse=True)
 
     def short_price_levels(self) -> list[float]:
         data = _cache.get(self.env.thinker_state_path(self.coin), _read_json)
-        return list(data.get("high_bound_prices", [])) if data else []
+        vals = [float(v) for v in data.get("high_bound_prices", []) if v] if data else []
+        return sorted(vals)
 
     def training_status(self) -> dict:
         data = _cache.get(self.env.trainer_state_path(self.coin), _read_json)
