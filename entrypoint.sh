@@ -13,7 +13,12 @@ fi
 # If the host file didn't exist, Docker creates a directory at the mount point.
 # Also allow env-var fallback for deployments that don't bind-mount the file.
 if [ -d /app/exchange_api_keys.json ]; then
-    rm -rf /app/exchange_api_keys.json
+    if ! rm -rf /app/exchange_api_keys.json 2>/dev/null; then
+        echo "[entrypoint] ERROR: exchange_api_keys.json is mounted as a directory."
+        echo "[entrypoint] The file must exist on the host before running 'docker compose up'."
+        echo "[entrypoint] Create it (even as an empty '{}') then run 'docker compose up -d' again."
+        exit 1
+    fi
 fi
 
 if [ ! -s /app/exchange_api_keys.json ]; then
