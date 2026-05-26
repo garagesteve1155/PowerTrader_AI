@@ -52,6 +52,7 @@ const state = {
   cfgSchema: {},
   cardMode: 'simple',
   historyFilterCoin: null,
+  _suppressAcctRangeHandler: false,
 };
 
 const TF_LIST = ['1min','5min','15min','30min','1hour','2hour','4hour','8hour','12hour','1day','1week'];
@@ -1175,7 +1176,7 @@ async function loadAccountChart(hours) {
   let _acctRangeTimer = null;
   let _acctRangeAbort = null;
   state.chart.timeScale().subscribeVisibleTimeRangeChange(range => {
-    if (!range || state.chartMode !== 'account') return;
+    if (!range || state.chartMode !== 'account' || state._suppressAcctRangeHandler) return;
     clearTimeout(_acctRangeTimer);
     _acctRangeTimer = setTimeout(async () => {
       if (_acctRangeAbort) _acctRangeAbort.abort();
@@ -1199,6 +1200,19 @@ async function loadAccountChart(hours) {
             value: isPct2 ? ((h.total_account_value - baseVal) / baseVal * 100) : h.total_account_value,
           })));
         });
+        // Keep marker overlay series in sync so trade markers sit on the correct Y positions
+        // in % mode (both must share the same baseVal from this windowed fetch).
+        const realXkR = state.exchangeList.find(xk => xk !== 'shadow');
+        if (state._acctMarkerSeries && realXkR) {
+          const refRaw = data.history[realXkR] || [];
+          if (refRaw.length > 0) {
+            const baseValR = refRaw[0].total_account_value;
+            state._acctMarkerSeries.setData(refRaw.map(h => ({
+              time: Math.floor(h.ts),
+              value: isPct2 ? ((h.total_account_value - baseValR) / baseValR * 100) : h.total_account_value,
+            })));
+          }
+        }
         if (visibleRange) state.chart.timeScale().setVisibleRange(visibleRange);
       } catch (e) {
         if (e.name !== 'AbortError') console.error('account range fetch failed:', e);
@@ -1288,6 +1302,11 @@ async function _applyAccountData(hours) {
     const histByXk = histData.history || {};
     const isPct = state.acctDisplayMode === 'pct';
 
+    // Suppress the adaptive range handler while we programmatically update all series.
+    // Without this, setData() triggers visibleTimeRangeChange, which replaces full
+    // history with a windowed subset — leaving the chart line in only the right portion
+    // until the next timer cycle restores it (visible as flickering in demo mode).
+    state._suppressAcctRangeHandler = true;
     const pointsByXk = {};
     state.exchangeList.forEach(xk => {
       const series = state.acctSeries[xk];
@@ -1366,7 +1385,9 @@ async function _applyAccountData(hours) {
         }
       }
     }
+    state._suppressAcctRangeHandler = false;
   } catch (e) {
+    state._suppressAcctRangeHandler = false;
     console.error('_applyAccountData failed:', e);
   }
 }
