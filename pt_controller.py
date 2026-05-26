@@ -114,8 +114,9 @@ def _rotate_log(path: Path):
 class ProcessController:
     """Manages thinker, trader, and trainer subprocesses."""
 
-    def __init__(self, env: PTEnv):
+    def __init__(self, env: PTEnv, code_dir: Path | None = None):
         self.env = env
+        self._code_dir = Path(code_dir).resolve() if code_dir else env.project_dir
         self._thinker = ProcHandle(name="thinker")
         self._data_manager = ProcHandle(name="data-manager")
         self._traders: dict[str, ProcHandle] = {}
@@ -130,6 +131,12 @@ class ProcessController:
     def _log_dir(self) -> Path:
         return self.env.logs_dir()
 
+    def _script_path(self, key: str) -> Path:
+        mapping = {"thinker": "script_thinker", "trainer": "script_neural_trainer", "trader": "script_trader"}
+        filename = self.env.get_config().get(mapping.get(key, key), f"pt_{key}.py")
+        p = Path(filename)
+        return p if p.is_absolute() else self._code_dir / p
+
     def _launch(self, handle: ProcHandle, script_path: str, args: list[str] | None = None,
                 cwd: str | None = None, prefix: str = "",
                 on_exit: callable = None, log_name: str | None = None) -> bool:
@@ -143,7 +150,7 @@ class ProcessController:
         try:
             handle.proc = subprocess.Popen(
                 cmd,
-                cwd=cwd or str(self.env.project_dir),
+                cwd=cwd or str(self._code_dir),
                 env=self._make_env(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -179,7 +186,7 @@ class ProcessController:
     # -- Data Manager --
 
     def start_data_manager(self) -> bool:
-        script = self.env.project_dir / "pt_data_manager.py"
+        script = self._code_dir / "pt_data_manager.py"
         if not script.is_file():
             return False
         return self._launch(
@@ -193,7 +200,7 @@ class ProcessController:
         self._stop(self._data_manager)
 
     def backfill_coin(self, coin: str) -> bool:
-        script = self.env.project_dir / "pt_data_manager.py"
+        script = self._code_dir / "pt_data_manager.py"
         if not script.is_file():
             return False
         h = ProcHandle(name=f"backfill-{coin.lower()}")
@@ -230,7 +237,7 @@ class ProcessController:
 
         return self._launch(
             self._thinker,
-            str(self.env.script_path("thinker")),
+            str(self._script_path("thinker")),
             prefix="[THINKER] ",
             log_name="thinker",
         )
@@ -275,7 +282,7 @@ class ProcessController:
             h = self._get_trader(xk)
             result = self._launch(
                 h,
-                str(self.env.script_path("trader")),
+                str(self._script_path("trader")),
                 args=["--exchange", xk],
                 prefix=f"[TRADER:{xk.upper()}] ",
                 log_name=f"trader-{xk}",
@@ -338,10 +345,7 @@ class ProcessController:
             coin_dir = self.env.coin_dir(coin)
             coin_dir.mkdir(parents=True, exist_ok=True)
 
-            trainer_name = os.path.basename(
-                self.env.get_config()["script_neural_trainer"]
-            )
-            trainer_path = self.env.project_dir / trainer_name
+            trainer_path = self._script_path("trainer")
             if not trainer_path.is_file():
                 return False
 

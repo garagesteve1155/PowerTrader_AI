@@ -41,8 +41,13 @@ _pre_args = _pre.parse_known_args()[0]
 _config_path = _pre_args.config
 _data_dir = Path(_pre_args.state_dir).resolve() if _pre_args.state_dir else PROJECT_DIR
 
+if _config_path is None and not (_data_dir / "pt_config.json").exists():
+    _fallback = PROJECT_DIR / "pt_config.json"
+    if _fallback.exists():
+        _config_path = str(_fallback)
+
 env = PTEnv(project_dir=_data_dir, config_path=_config_path)
-ctrl = ProcessController(env)
+ctrl = ProcessController(env, code_dir=PROJECT_DIR)
 app = FastAPI(title="PowerTrader Web")
 
 _exchanges: dict = {}  # real-exchange-key → Exchange (PaperExchange or ShadowedExchange)
