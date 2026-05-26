@@ -124,3 +124,13 @@ docker build --build-arg CACHEBUST=$(date +%s) -t swedishhh/powertrader:latest .
 docker login
 docker push swedishhh/powertrader:latest
 ```
+
+To also publish a versioned tag (e.g. `2.0.0`), add `-t` for each tag and push both:
+
+```bash
+docker build --build-arg CACHEBUST=$(date +%s) \
+  -t swedishhh/powertrader:latest \
+  -t swedishhh/powertrader:2.0.0 .
+docker push swedishhh/powertrader:latest
+docker push swedishhh/powertrader:2.0.0
+```
