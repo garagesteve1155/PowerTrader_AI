@@ -1217,7 +1217,19 @@ async function loadAccountChart(hours) {
             })));
           }
         }
-        if (visibleRange) state.chart.timeScale().setVisibleRange(visibleRange);
+        if (visibleRange) {
+          // If the fetched data doesn't reach the edges of the saved range (e.g. demo mode
+          // has limited history), fitContent rather than forcing a wide empty axis.
+          const refRaw2 = realXkR ? (data.history[realXkR] || []) : [];
+          const coversRange = refRaw2.length > 0
+            && refRaw2[0].ts <= visibleRange.from
+            && refRaw2[refRaw2.length - 1].ts >= visibleRange.to;
+          if (coversRange) {
+            state.chart.timeScale().setVisibleRange(visibleRange);
+          } else {
+            state.chart.timeScale().fitContent();
+          }
+        }
         state._suppressAcctRangeHandler = false;
       } catch (e) {
         if (e.name !== 'AbortError') console.error('account range fetch failed:', e);
@@ -1225,9 +1237,16 @@ async function loadAccountChart(hours) {
     }, 300);
   });
 
-  // ResizeObserver to handle panel size changes after chart creation
+  // ResizeObserver to handle panel size changes after chart creation.
+  // Suppress the range handler during resize: applyOptions widens the visible range
+  // proportionally, which would otherwise trigger a windowed fetch that shows data
+  // only on the right (prominent in demo mode with limited history).
   const resizeObserver = new ResizeObserver(() => {
-    if (state.chart) state.chart.applyOptions({width: container.clientWidth, height: container.clientHeight});
+    if (!state.chart) return;
+    state._suppressAcctRangeHandler = true;
+    state.chart.applyOptions({width: container.clientWidth, height: container.clientHeight});
+    state.chart.timeScale().fitContent();
+    state._suppressAcctRangeHandler = false;
   });
   resizeObserver.observe(container);
 
@@ -2507,8 +2526,14 @@ function _errorsLevelClass(level) {
 }
 
 function _errorsTimestamp(ts) {
-  const d = new Date(ts * 1000);
-  return d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+  const d = typeof ts === 'number' ? new Date(ts * 1000) : new Date(ts);
+  const Y = d.getFullYear();
+  const M = String(d.getMonth() + 1).padStart(2, '0');
+  const D = String(d.getDate()).padStart(2, '0');
+  const h = String(d.getHours()).padStart(2, '0');
+  const m = String(d.getMinutes()).padStart(2, '0');
+  const s = String(d.getSeconds()).padStart(2, '0');
+  return `${Y}${M}${D}.${h}${m}${s}`;
 }
 
 function renderErrors(entries) {

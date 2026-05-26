@@ -36,9 +36,12 @@ WEB_DIR = PROJECT_DIR / "web"
 
 _pre = argparse.ArgumentParser(add_help=False)
 _pre.add_argument("--config", default=None)
-_config_path = _pre.parse_known_args()[0].config
+_pre.add_argument("--state_dir", default=None)
+_pre_args = _pre.parse_known_args()[0]
+_config_path = _pre_args.config
+_data_dir = Path(_pre_args.state_dir).resolve() if _pre_args.state_dir else PROJECT_DIR
 
-env = PTEnv(project_dir=PROJECT_DIR, config_path=_config_path)
+env = PTEnv(project_dir=_data_dir, config_path=_config_path)
 ctrl = ProcessController(env)
 app = FastAPI(title="PowerTrader Web")
 
@@ -1465,5 +1468,6 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--config", default=None, help="Path to config JSON (default: pt_config.json)")
+    parser.add_argument("--state_dir", default=None, help="Directory containing pt_config.json and state/ (default: directory of pt_web.py)")
     args = parser.parse_args()
     uvicorn.run(app, host=args.host, port=args.port)

@@ -2032,7 +2032,18 @@ class CryptoAPITrading:
             full_symbol = f"{symbol}_USD"
             orders = self.get_orders(full_symbol)
             if not orders or "results" not in orders:
-                self.dca_levels_triggered[symbol] = []
+                # API failure (e.g. rate-limit) — preserve current in-memory stage
+                # rather than silently zeroing it, which would trigger premature DCA.
+                current = len(self.dca_levels_triggered.get(symbol, []))
+                log.warning(f"initialize_dca_levels: get_orders failed for {symbol} — keeping stage {current}")
+                pt_errors.emit(
+                    f"trader-{EXCHANGE_KEY}",
+                    level="warning",
+                    message=f"Could not verify DCA stage for {symbol} — order fetch failed",
+                    detail=f"Kraken API did not return orders for {symbol} (rate limit or transient error). "
+                           f"DCA stage kept at {current} to avoid triggering a premature buy. "
+                           f"If the stage is wrong after recovery, restart the trader or trigger a hub reseed.",
+                )
                 continue
 
             relevant_buy_orders = []
