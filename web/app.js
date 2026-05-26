@@ -1170,7 +1170,9 @@ async function loadAccountChart(hours) {
 
   await _applyAccountData(hours);
 
+  state._suppressAcctRangeHandler = true;
   state.chart.timeScale().fitContent();
+  state._suppressAcctRangeHandler = false;
 
   // Adaptive resolution: refetch when the user zooms or pans
   let _acctRangeTimer = null;
@@ -1190,6 +1192,8 @@ async function loadAccountChart(hours) {
         if (!data.history || state.chartMode !== 'account') return;
         const visibleRange = state.chart.timeScale().getVisibleRange();
         const isPct2 = state.acctDisplayMode === 'pct';
+        // Suppress so our own setData/setVisibleRange calls don't re-trigger this handler.
+        state._suppressAcctRangeHandler = true;
         state.exchangeList.forEach(xk => {
           const series = state.acctSeries[xk];
           const raw = (data.history[xk] || []);
@@ -1214,6 +1218,7 @@ async function loadAccountChart(hours) {
           }
         }
         if (visibleRange) state.chart.timeScale().setVisibleRange(visibleRange);
+        state._suppressAcctRangeHandler = false;
       } catch (e) {
         if (e.name !== 'AbortError') console.error('account range fetch failed:', e);
       }
