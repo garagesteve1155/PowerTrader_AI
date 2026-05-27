@@ -52,7 +52,8 @@ const state = {
   cfgSchema: {},
   cardMode: 'simple',
   historyFilterCoin: null,
-  _suppressAcctRangeHandler: false,
+  _acctRangeTimer: null,
+  _acctRangeAbort: null,
 };
 
 const TF_LIST = ['1min','5min','15min','30min','1hour','2hour','4hour','8hour','12hour','1day','1week'];
@@ -1052,14 +1053,10 @@ async function loadAccountChart(hours) {
   const container = $('#chart-container');
   const diffContainer = $('#chart-diff-container');
 
-  if (state.chartRefreshTimer) {
-    clearInterval(state.chartRefreshTimer);
-    state.chartRefreshTimer = null;
-  }
-  if (state.chartMarkersTimer) {
-    clearInterval(state.chartMarkersTimer);
-    state.chartMarkersTimer = null;
-  }
+  clearTimeout(state._acctRangeTimer);
+  if (state._acctRangeAbort) { state._acctRangeAbort.abort(); state._acctRangeAbort = null; }
+  if (state.chartRefreshTimer) { clearInterval(state.chartRefreshTimer); state.chartRefreshTimer = null; }
+  if (state.chartMarkersTimer) { clearInterval(state.chartMarkersTimer); state.chartMarkersTimer = null; }
   if (state.chart) {
     state.chart.remove();
     state.chart = null;
@@ -1072,24 +1069,10 @@ async function loadAccountChart(hours) {
   const isPct = state.acctDisplayMode === 'pct';
   const hasMulti = state.exchangeList.length >= 2;
 
-  const _fmtUsd = v => {
-    const s = '$' + v.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-    return s.padStart(10);
-  };
-  const _fmtPct = v => {
-    const s = (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
-    return s.padStart(8);
-  };
-  const _priceFmt = isPct ? _fmtPct : _fmtUsd;
-
-  const _fmtDiff = v => {
-    const s = (v >= 0 ? '+$' : '-$') + Math.abs(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-    return s.padStart(10);
-  };
-  const _fmtDiffPct = v => {
-    const s = (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
-    return s.padStart(8);
-  };
+  const _fmtUsd     = v => ('$' + v.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})).padStart(10);
+  const _fmtPct     = v => ((v >= 0 ? '+' : '') + v.toFixed(2) + '%').padStart(8);
+  const _fmtDiff    = v => ((v >= 0 ? '+$' : '-$') + Math.abs(v).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})).padStart(10);
+  const _fmtDiffPct = v => ((v >= 0 ? '+' : '') + v.toFixed(2) + '%').padStart(8);
 
   state.chart = LightweightCharts.createChart(container, {
     width: container.clientWidth,
@@ -1109,148 +1092,78 @@ async function loadAccountChart(hours) {
       vertLine: {color: '#3A3A60', style: 2, width: 1},
       horzLine: {color: '#3A3A60', style: 2, width: 1},
     },
-    timeScale: {
-      borderColor: CHART_COLORS.border,
-      timeVisible: true,
-      secondsVisible: false,
-    },
-    leftPriceScale: {
-      visible: hasMulti,
-      borderColor: CHART_COLORS.border,
-      scaleMargins: {top: 0.15, bottom: 0.05},
-    },
-    rightPriceScale: {
-      borderColor: CHART_COLORS.border,
-    },
-    localization: {
-      priceFormatter: _priceFmt,
-    },
+    timeScale: {borderColor: CHART_COLORS.border, timeVisible: true, secondsVisible: false},
+    leftPriceScale: {visible: hasMulti, borderColor: CHART_COLORS.border, scaleMargins: {top: 0.15, bottom: 0.05}},
+    rightPriceScale: {borderColor: CHART_COLORS.border},
+    localization: {priceFormatter: isPct ? _fmtPct : _fmtUsd},
   });
 
   state._acctHidden = state._acctHidden || {};
   state.exchangeList.forEach(xk => {
     state.acctSeries[xk] = state.chart.addLineSeries({
-      color: xkColor(xk),
-      lineWidth: 2,
-      title: '',
-      priceScaleId: 'right',
+      color: xkColor(xk), lineWidth: 2, title: '', priceScaleId: 'right',
       priceFormat: {type: 'price', precision: 2, minMove: 0.01},
       visible: !state._acctHidden[xk],
     });
   });
 
   state._acctMarkerSeries = state.chart.addLineSeries({
-    color: 'transparent',
-    lineWidth: 0,
-    lastValueVisible: false,
-    priceLineVisible: false,
-    crosshairMarkerVisible: false,
-    priceScaleId: 'right',
+    color: 'transparent', lineWidth: 0, lastValueVisible: false,
+    priceLineVisible: false, crosshairMarkerVisible: false, priceScaleId: 'right',
   });
 
-  // Diff series on left axis (real exchange − control)
   if (hasMulti) {
     diffContainer.classList.add('hidden');
     state._diffSeries = state.chart.addLineSeries({
-      color: '#555570',
-      lineWidth: 1,
-      title: '',
-      priceScaleId: 'left',
+      color: '#555570', lineWidth: 1, title: '', priceScaleId: 'left',
       priceFormat: {type: 'custom', formatter: isPct ? _fmtDiffPct : _fmtDiff, minMove: 0.01},
-      lastValueVisible: true,
-      priceLineVisible: false,
+      lastValueVisible: true, priceLineVisible: false,
     });
-    state._diffSeries.createPriceLine({
-      price: 0, color: '#2A2A48', lineWidth: 1, lineStyle: 0,
-      axisLabelVisible: false,
-    });
+    state._diffSeries.createPriceLine({price: 0, color: '#2A2A48', lineWidth: 1, lineStyle: 0, axisLabelVisible: false});
   } else {
     diffContainer.classList.add('hidden');
   }
 
-  await _applyAccountData(hours);
-
-  state._suppressAcctRangeHandler = true;
+  // Initial load
+  await _acctApplyData(hours, null, null, null);
   state.chart.timeScale().fitContent();
-  state._suppressAcctRangeHandler = false;
 
-  // Adaptive resolution: refetch when the user zooms or pans
-  let _acctRangeTimer = null;
-  let _acctRangeAbort = null;
-  state.chart.timeScale().subscribeVisibleTimeRangeChange(range => {
-    if (!range || state.chartMode !== 'account' || state._suppressAcctRangeHandler) return;
-    clearTimeout(_acctRangeTimer);
-    _acctRangeTimer = setTimeout(async () => {
-      if (_acctRangeAbort) _acctRangeAbort.abort();
-      _acctRangeAbort = new AbortController();
+  // Adaptive zoom handler. setData fires visibleTimeRangeChange asynchronously
+  // (after the await in the timeout), so we unsubscribe before any data write and
+  // re-subscribe after — the only reliable way to stop the event→fetch→event loop.
+  let _rangeHandler = null;
+  const _unsub = () => { if (_rangeHandler && state.chart) try { state.chart.timeScale().unsubscribeVisibleTimeRangeChange(_rangeHandler); } catch {} };
+  const _resub  = () => { if (_rangeHandler && state.chart && state.chartMode === 'account') state.chart.timeScale().subscribeVisibleTimeRangeChange(_rangeHandler); };
+
+  _rangeHandler = range => {
+    if (!range || state.chartMode !== 'account') return;
+    clearTimeout(state._acctRangeTimer);
+    state._acctRangeTimer = setTimeout(async () => {
+      if (state._acctRangeAbort) state._acctRangeAbort.abort();
+      state._acctRangeAbort = new AbortController();
       const span = range.to - range.from;
-      const start = Math.floor(range.from - span);
-      const end   = Math.ceil(range.to   + span);
-      try {
-        const qs = `?start=${start}&end=${end}`;
-        const data = await api('account-history' + qs, {signal: _acctRangeAbort.signal});
-        if (!data.history || state.chartMode !== 'account') return;
-        const visibleRange = state.chart.timeScale().getVisibleRange();
-        const isPct2 = state.acctDisplayMode === 'pct';
-        // Suppress so our own setData/setVisibleRange calls don't re-trigger this handler.
-        state._suppressAcctRangeHandler = true;
-        state.exchangeList.forEach(xk => {
-          const series = state.acctSeries[xk];
-          const raw = (data.history[xk] || []);
-          if (!series || !raw.length) return;
-          const baseVal = raw[0].total_account_value;
-          series.setData(raw.map(h => ({
-            time: Math.floor(h.ts),
-            value: isPct2 ? ((h.total_account_value - baseVal) / baseVal * 100) : h.total_account_value,
-          })));
-        });
-        // Keep marker overlay series in sync so trade markers sit on the correct Y positions
-        // in % mode (both must share the same baseVal from this windowed fetch).
-        const realXkR = state.exchangeList.find(xk => xk !== 'shadow');
-        if (state._acctMarkerSeries && realXkR) {
-          const refRaw = data.history[realXkR] || [];
-          if (refRaw.length > 0) {
-            const baseValR = refRaw[0].total_account_value;
-            state._acctMarkerSeries.setData(refRaw.map(h => ({
-              time: Math.floor(h.ts),
-              value: isPct2 ? ((h.total_account_value - baseValR) / baseValR * 100) : h.total_account_value,
-            })));
-          }
-        }
-        if (visibleRange) {
-          // If the fetched data doesn't reach the edges of the saved range (e.g. demo mode
-          // has limited history), fitContent rather than forcing a wide empty axis.
-          const refRaw2 = realXkR ? (data.history[realXkR] || []) : [];
-          const coversRange = refRaw2.length > 0
-            && refRaw2[0].ts <= visibleRange.from
-            && refRaw2[refRaw2.length - 1].ts >= visibleRange.to;
-          if (coversRange) {
-            state.chart.timeScale().setVisibleRange(visibleRange);
-          } else {
-            state.chart.timeScale().fitContent();
-          }
-        }
-        state._suppressAcctRangeHandler = false;
-      } catch (e) {
-        if (e.name !== 'AbortError') console.error('account range fetch failed:', e);
-      }
+      const visibleRange = state.chart?.timeScale().getVisibleRange();
+      _unsub();
+      await _acctApplyData(0, Math.floor(range.from - span), Math.ceil(range.to + span), state._acctRangeAbort.signal);
+      if (visibleRange && state.chartMode === 'account' && state.chart) state.chart.timeScale().setVisibleRange(visibleRange);
+      _resub();
     }, 300);
-  });
+  };
+  state.chart.timeScale().subscribeVisibleTimeRangeChange(_rangeHandler);
 
-  // ResizeObserver to handle panel size changes after chart creation.
-  // Suppress the range handler during resize: applyOptions widens the visible range
-  // proportionally, which would otherwise trigger a windowed fetch that shows data
-  // only on the right (prominent in demo mode with limited history).
+  // Resize: preserve zoom/pan
   const resizeObserver = new ResizeObserver(() => {
     if (!state.chart) return;
-    state._suppressAcctRangeHandler = true;
+    const r = state.chart.timeScale().getVisibleRange();
+    _unsub();
     state.chart.applyOptions({width: container.clientWidth, height: container.clientHeight});
-    state.chart.timeScale().fitContent();
-    state._suppressAcctRangeHandler = false;
+    if (r) state.chart.timeScale().setVisibleRange(r);
+    else state.chart.timeScale().fitContent();
+    _resub();
   });
   resizeObserver.observe(container);
 
-  // Build controls: range buttons + $/%  toggle
+  // Controls: range buttons + $/% toggle
   const tfContainer = $('#tf-selector');
   tfContainer.style.display = '';
   tfContainer.innerHTML = '';
@@ -1261,30 +1174,28 @@ async function loadAccountChart(hours) {
     btn.addEventListener('click', () => selectAccountChart(r.hours));
     tfContainer.appendChild(btn);
   });
-
   const sep = document.createElement('span');
   sep.className = 'tf-sep';
   tfContainer.appendChild(sep);
-
   ['usd', 'pct'].forEach(mode => {
     const btn = document.createElement('button');
     btn.className = 'tf-btn' + (state.acctDisplayMode === mode ? ' active' : '');
     btn.textContent = mode === 'usd' ? '$' : '%';
-    btn.addEventListener('click', () => {
-      state.acctDisplayMode = mode;
-      loadAccountChart(state.accountRange);
-    });
+    btn.addEventListener('click', () => { state.acctDisplayMode = mode; loadAccountChart(state.accountRange); });
     tfContainer.appendChild(btn);
   });
 
-  // Legend
   _buildAccountLegend();
 
+  // Timer refresh: preserve zoom/pan
   state.chartRefreshTimer = setInterval(async () => {
-    if (state.chartMode !== 'account') return;
-    await _applyAccountData(state.accountRange);
-  }, (state.cfg.chart_refresh_seconds && state.cfg.chart_refresh_seconds * 1000) || 30_000);
-
+    if (state.chartMode !== 'account' || !state.chart) return;
+    const r = state.chart.timeScale().getVisibleRange();
+    _unsub();
+    await _acctApplyData(state.accountRange, null, null, null);
+    if (r && state.chart) state.chart.timeScale().setVisibleRange(r);
+    _resub();
+  }, (state.cfg.chart_refresh_seconds && state.cfg.chart_refresh_seconds * 1000) || 300_000);
 }
 
 function _buildAccountLegend() {
@@ -1316,103 +1227,72 @@ function _buildAccountLegend() {
   }
 }
 
-async function _applyAccountData(hours) {
+async function _acctApplyData(hours, start, end, signal) {
   try {
-    const qs = hours > 0 ? `?hours=${hours}` : '';
+    const qs = (start !== null && end !== null) ? `?start=${start}&end=${end}` : hours > 0 ? `?hours=${hours}` : '';
+    const opts = signal ? {signal} : {};
     const [histData, tradeData] = await Promise.all([
-      api('account-history' + qs),
-      api('trades?limit=500'),
+      api('account-history' + qs, opts),
+      api('trades?limit=500', opts),
     ]);
-    const histByXk = histData.history || {};
-    const isPct = state.acctDisplayMode === 'pct';
+    if (!histData.history || state.chartMode !== 'account') return;
+    const histByXk = histData.history;
+    const pct = state.acctDisplayMode === 'pct';
 
-    // Suppress the adaptive range handler while we programmatically update all series.
-    // Without this, setData() triggers visibleTimeRangeChange, which replaces full
-    // history with a windowed subset — leaving the chart line in only the right portion
-    // until the next timer cycle restores it (visible as flickering in demo mode).
-    state._suppressAcctRangeHandler = true;
     const pointsByXk = {};
     state.exchangeList.forEach(xk => {
       const series = state.acctSeries[xk];
       const raw = histByXk[xk] || [];
-      if (!series || raw.length === 0) return;
-
-      const baseVal = raw[0].total_account_value;
-      const points = raw.map(h => {
-        const t = Math.floor(h.ts);
-        const v = h.total_account_value;
-        return {time: t, value: isPct ? ((v - baseVal) / baseVal) * 100 : v};
-      });
-      series.setData(points);
-      pointsByXk[xk] = points;
+      if (!series || !raw.length) return;
+      const base = raw[0].total_account_value;
+      const pts = raw.map(h => ({
+        time: Math.floor(h.ts),
+        value: pct ? (h.total_account_value - base) / base * 100 : h.total_account_value,
+      }));
+      series.setData(pts);
+      pointsByXk[xk] = pts;
     });
 
-    // Diff series: real exchange − control
     if (state._diffSeries && state.exchangeList.length >= 2) {
       const ctrlPts = pointsByXk['shadow'] || [];
-      const realXk2 = state.exchangeList.find(xk => xk !== 'shadow');
-      const realPts = realXk2 ? (pointsByXk[realXk2] || []) : [];
-      if (ctrlPts.length > 0 && realPts.length > 0) {
+      const realXk = state.exchangeList.find(xk => xk !== 'shadow');
+      const realPts = realXk ? (pointsByXk[realXk] || []) : [];
+      if (ctrlPts.length && realPts.length) {
         const ctrlMap = new Map(ctrlPts.map(p => [p.time, p.value]));
-        const diffPts = [];
-        realPts.forEach(p => {
-          const cv = ctrlMap.get(p.time);
-          if (cv !== undefined) diffPts.push({time: p.time, value: p.value - cv});
-        });
-        state._diffSeries.setData(diffPts);
+        state._diffSeries.setData(
+          realPts.flatMap(p => { const cv = ctrlMap.get(p.time); return cv !== undefined ? [{time: p.time, value: p.value - cv}] : []; })
+        );
       }
     }
-
-    // Trade markers on real exchange lines only (skip control trades)
-    const realTrades = [];
-    const tradesByXk = tradeData.trades || {};
-    state.exchangeList.forEach(xk => {
-      if (xk === 'shadow') return;
-      (tradesByXk[xk] || []).forEach(t => realTrades.push({...t, _xk: xk}));
-    });
 
     const realXk = state.exchangeList.find(xk => xk !== 'shadow');
-    if (state._acctMarkerSeries && realTrades.length > 0 && realXk) {
-      const refSeries = state.acctSeries[realXk];
-      if (refSeries) {
-        const markers = realTrades
-          .filter(t => t.side === 'buy' || t.side === 'sell')
-          .map(t => {
-            const side = t.side.toLowerCase();
-            const tag = (t.tag || '').toUpperCase();
-            const coin = (t.symbol || '').split('_')[0];
-            let label, color, shape, position;
-            if (side === 'buy') {
-              label = coin;
-              color = tag === 'DCA' ? '#A855F7' : '#FF4466';
-              shape = 'arrowUp';
-              position = 'belowBar';
-            } else {
-              label = coin;
-              color = '#00CC66';
-              shape = 'arrowDown';
-              position = 'aboveBar';
-            }
-            return {time: Math.floor(t.ts), position, color, shape, text: label};
-          })
-          .sort((a, b) => a.time - b.time);
-
-        const refRaw = histByXk[realXk] || [];
-        const baseVal = refRaw.length > 0 ? refRaw[0].total_account_value : 0;
-        const overlayPoints = refRaw.map(h => ({
+    if (state._acctMarkerSeries && realXk) {
+      const refRaw = histByXk[realXk] || [];
+      if (refRaw.length) {
+        const base = refRaw[0].total_account_value;
+        state._acctMarkerSeries.setData(refRaw.map(h => ({
           time: Math.floor(h.ts),
-          value: isPct ? ((h.total_account_value - baseVal) / baseVal) * 100 : h.total_account_value,
-        }));
-        if (overlayPoints.length > 0) {
-          state._acctMarkerSeries.setData(overlayPoints);
-          state._acctMarkerSeries.setMarkers(markers);
-        }
+          value: pct ? (h.total_account_value - base) / base * 100 : h.total_account_value,
+        })));
+        const markers = [];
+        state.exchangeList.forEach(xk => {
+          if (xk === 'shadow') return;
+          ((tradeData.trades || {})[xk] || []).forEach(t => {
+            const side = (t.side || '').toLowerCase();
+            markers.push({
+              time: Math.floor(t.ts),
+              position: side === 'buy' ? 'belowBar' : 'aboveBar',
+              color: side === 'buy' ? ((t.tag || '').toUpperCase() === 'DCA' ? '#A855F7' : '#FF4466') : '#00CC66',
+              shape: side === 'buy' ? 'arrowUp' : 'arrowDown',
+              text: (t.symbol || '').split('_')[0],
+            });
+          });
+        });
+        state._acctMarkerSeries.setMarkers(markers.sort((a, b) => a.time - b.time));
       }
     }
-    state._suppressAcctRangeHandler = false;
   } catch (e) {
-    state._suppressAcctRangeHandler = false;
-    console.error('_applyAccountData failed:', e);
+    if (!signal || e.name !== 'AbortError') console.error('_acctApplyData failed:', e);
   }
 }
 
