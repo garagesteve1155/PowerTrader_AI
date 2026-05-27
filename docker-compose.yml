@@ -2,6 +2,7 @@ services:
   powertrader:
     # Use 'latest' for the most recent release, or pin to a specific version e.g. swedishhh/powertrader:1.0.0
     image: swedishhh/powertrader:latest
+    platform: linux/amd64
     ports:
       # Left side = port on YOUR machine. Change this if 8080 is already in use.
       # Right side = port inside the container. Do not change this.

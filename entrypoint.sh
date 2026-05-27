@@ -6,7 +6,12 @@ set -e
 # Remove it so pt_env falls back to built-in defaults on first run.
 # On subsequent runs the UI writes a real file to the host path.
 if [ -d /app/pt_config.json ]; then
-    rm -rf /app/pt_config.json
+    if ! rm -rf /app/pt_config.json 2>/dev/null; then
+        echo "[entrypoint] ERROR: pt_config.json is mounted as a directory."
+        echo "[entrypoint] The file must exist on the host before running 'docker compose up'."
+        echo "[entrypoint] Create it as an empty '{}' then run 'docker compose up -d' again."
+        exit 1
+    fi
 fi
 
 # --- exchange_api_keys.json ---
