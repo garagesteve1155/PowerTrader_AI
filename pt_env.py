@@ -105,6 +105,7 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     "ui_log_font_size": 11,
 
     # Notifications
+    "notifications_enabled": True,
     "ntfy_url": "",
     "ntfy_summary_interval_minutes": 60,
 
@@ -295,6 +296,12 @@ CONFIG_SCHEMA: dict[str, dict] = {
     },
 
     # ── Notifications ─────────────────────────────────────────────────────
+    "notifications_enabled": {
+        "type": "bool",
+        "label": "Notifications Enabled",
+        "hint": "Master switch — turn off to suppress all push notifications.",
+        "group": "Notifications",
+    },
     "ntfy_url": {
         "type": "str",
         "label": "ntfy URL",

@@ -2226,11 +2226,19 @@ function renderConfig(cfg) {
     const fields = grouped[group];
     if (!fields || !fields.length) continue;
     html += `<div class="settings-group"><div class="settings-group-title">${group}</div>`;
-    for (const key of fields) {
-      html += _cfgBuildInput(key, schema[key], cfg[key]);
-    }
     if (group === 'Notifications') {
+      html += _cfgBuildInput('notifications_enabled', schema['notifications_enabled'], cfg['notifications_enabled']);
+      const bodyDisabled = !cfg['notifications_enabled'];
+      html += `<div id="notifications-body" style="${bodyDisabled ? 'opacity:0.4;pointer-events:none' : ''}">`;
+      for (const key of fields.filter(k => k !== 'notifications_enabled')) {
+        html += _cfgBuildInput(key, schema[key], cfg[key]);
+      }
       html += `<div class="settings-field"><button type="button" class="btn btn-secondary" id="btn-test-notify">Send test notification</button><span id="notify-test-status" style="margin-left:10px;font-size:12px;color:var(--text-muted)"></span></div>`;
+      html += '</div>';
+    } else {
+      for (const key of fields) {
+        html += _cfgBuildInput(key, schema[key], cfg[key]);
+      }
     }
     html += '</div>';
   }
@@ -2244,6 +2252,13 @@ function renderConfig(cfg) {
   form.addEventListener('input', () => _cfgCheckDirty(original));
   form.addEventListener('change', () => {
     _cfgCheckDirty(original);
+    // When notifications_enabled toggles, grey the body
+    const notifyToggle = $('#cfg-field-notifications_enabled');
+    const notifyBody = $('#notifications-body');
+    if (notifyToggle && notifyBody) {
+      notifyBody.style.opacity = notifyToggle.checked ? '' : '0.4';
+      notifyBody.style.pointerEvents = notifyToggle.checked ? '' : 'none';
+    }
     // When trading_mode changes, toggle exchange dropdown disabled state
     const modeEl = $('#cfg-field-trading_mode');
     const wrap = $('#cfg-field-exchange-wrap');

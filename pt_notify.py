@@ -58,7 +58,10 @@ def _ntfy_url() -> str:
     try:
         from pt_env import PTEnv
         env = PTEnv(os.path.dirname(os.path.abspath(__file__)))
-        return str(env.get_config().get("ntfy_url") or "").strip()
+        cfg = env.get_config()
+        if not cfg.get("notifications_enabled", True):
+            return ""
+        return str(cfg.get("ntfy_url") or "").strip()
     except Exception:
         return ""
 

@@ -706,6 +706,8 @@ async def api_clear_errors():
 @app.post("/api/notify/test")
 async def api_notify_test():
     cfg = env.get_config()
+    if not cfg.get("notifications_enabled", True):
+        return {"ok": False, "error": "Notifications are disabled in Settings"}
     if not str(cfg.get("ntfy_url") or "").strip():
         return {"ok": False, "error": "ntfy_url is not configured in Settings"}
     try:
