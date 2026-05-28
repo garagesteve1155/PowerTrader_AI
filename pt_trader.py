@@ -214,6 +214,7 @@ class CryptoAPITrading:
         self.exchange = exchange
 
         self._skipped_coins: set = set()
+        self._skip_throttle: dict = {}  # key -> last emit timestamp
         self.dca_levels_triggered = {}  # Track DCA levels for each crypto
         self.dca_levels = list(DCA_LEVELS)  # Hard DCA triggers (percent PnL)
 
@@ -1594,22 +1595,13 @@ class CryptoAPITrading:
             log.exception("pending order reconciliation failed")
 
     def _record_skip(self, symbol: str, reason: str) -> None:
-        """Record a skipped buy in trade_history so the UI can show it."""
-        entry = {
-            "ts": utcnow(),
-            "side": "skip",
-            "tag": "SKIP",
-            "symbol": symbol,
-            "qty": 0,
-            "price": None,
-            "notional_usd": None,
-            "reason": reason,
-        }
-        try:
-            with open(TRADE_HISTORY_PATH, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, default=str) + "\n")
-        except Exception as e:
-            log.warning(f"could not write skip record for {symbol}: {e}")
+        """Emit a skipped-buy warning to the error panel (throttled to once per 10 min per symbol+reason)."""
+        key = f"{symbol}|{reason}"
+        now = time.time()
+        if now - self._skip_throttle.get(key, 0.0) < 600:
+            return
+        self._skip_throttle[key] = now
+        pt_errors.emit("trader", f"{symbol}: {reason}", level="warning")
 
     def _record_trade(
         self,

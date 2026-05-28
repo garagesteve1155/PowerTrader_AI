@@ -1519,12 +1519,11 @@ async function loadTradeHistory() {
     const pair   = (t.symbol || '').replace('_', '/');
     const coin   = (t.symbol || '').split('_')[0];
     const isSell = t.side === 'sell';
-    const isSkip = t.side === 'skip';
     const hasPnl = isSell && t.pnl_pct != null;
     const pnlClass = hasPnl ? (t.pnl_pct >= 0 ? 'positive' : 'negative') : '';
     const tagHtml = t.tag ? `<span class="hist-tag ${t.tag}">${t.tag}</span>` : '';
     const xkC    = xkColor(t._xk);
-    const rowCls = isSkip ? 'trades-row trades-row-skip' : (isSell ? 'trades-row trades-row-sell' : 'trades-row');
+    const rowCls = isSell ? 'trades-row trades-row-sell' : 'trades-row';
 
     const pnlCell = hasPnl
       ? `<span class="hist-pnl ${pnlClass}">${fmtPct(t.pnl_pct)}</span>
