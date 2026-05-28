@@ -3110,6 +3110,7 @@ class CryptoAPITrading:
 
                 else:
                     log.info(f"DCA {symbol} skipped — insufficient funds")
+                    self._record_skip(full_symbol, f"DCA skipped — insufficient funds (need ${dca_amount:.2f})")
 
             else:
                 pass
@@ -3260,7 +3261,9 @@ class CryptoAPITrading:
                 allocation_in_usd,
             )
 
-            if response is not None:
+            if response is None:
+                self._record_skip(full_symbol, f"Buy failed — insufficient funds (alloc ${allocation_in_usd:.2f})")
+            else:
                 trades_made = True
                 # Do NOT pre-trigger any DCA levels. Hardcoded DCA will mark levels only when it hits your loss thresholds.
                 self.dca_levels_triggered[base_symbol] = []
