@@ -2485,25 +2485,22 @@ function _rebuildErrorComponentFilter(entries) {
   if (current) sel.value = current;
 }
 
-let _badgeErrors = 0;
-let _badgeWarnings = 0;
+let _badgeCounts = {};
 function _updateErrorsBadge() {
   const btn = $('[data-tab="errors"]');
   if (!btn) return;
-  const total = _badgeErrors + _badgeWarnings;
-  if (total > 0) {
-    btn.dataset.badge = total > 99 ? '99+' : String(total);
-    btn.classList.add('has-badge');
-    btn.classList.toggle('badge-warn', _badgeErrors === 0);
-  } else {
-    btn.removeAttribute('data-badge');
-    btn.classList.remove('has-badge', 'badge-warn');
-  }
+  let group = btn.querySelector('.tab-badge-group');
+  const entries = Object.entries(_badgeCounts).filter(([, n]) => n > 0);
+  if (entries.length === 0) { group && group.remove(); return; }
+  if (!group) { group = document.createElement('div'); group.className = 'tab-badge-group'; btn.appendChild(group); }
+  group.innerHTML = entries.map(([level, n]) =>
+    `<span class="tab-badge tab-badge--${level}">${n > 99 ? '99+' : n}</span>`
+  ).join('');
 }
 
 function onNewErrorEvent(entry) {
-  if (entry.level === 'error') _badgeErrors++;
-  else if (entry.level === 'warning') _badgeWarnings++;
+  const lvl = entry.level || 'error';
+  _badgeCounts[lvl] = (_badgeCounts[lvl] || 0) + 1;
   _updateErrorsBadge();
   const errTab = $('#tab-errors');
   if (errTab && errTab.classList.contains('active')) {
@@ -2582,8 +2579,7 @@ function setupTabs() {
         state.logRefreshTimer = setInterval(refreshLogs, 3000);
       }
       if (tab === 'errors') {
-        _badgeErrors = 0;
-        _badgeWarnings = 0;
+        _badgeCounts = {};
         _updateErrorsBadge();
         loadErrors();
       }

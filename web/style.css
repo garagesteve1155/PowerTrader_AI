@@ -1062,24 +1062,28 @@ body {
 .tab-btn:hover { color: var(--text-secondary); background: var(--bg-surface); }
 .tab-btn.active { color: var(--gold); background: var(--bg-surface); }
 
-.tab-btn.has-badge { position: relative; }
-.tab-btn.has-badge::after {
-  content: attr(data-badge);
+.tab-btn { position: relative; }
+.tab-badge-group {
   position: absolute;
-  top: 3px; right: 3px;
+  top: 2px; right: 2px;
+  display: flex;
+  gap: 2px;
+  pointer-events: none;
+}
+.tab-badge {
   min-width: 16px;
   height: 16px;
   padding: 0 4px;
-  background: var(--red);
-  color: #fff;
   font-size: 9px;
   font-weight: 700;
   line-height: 16px;
   border-radius: 8px;
   text-align: center;
-  pointer-events: none;
+  color: #fff;
+  background: var(--text-muted);
 }
-.tab-btn.has-badge.badge-warn::after { background: #e8900a; }
+.tab-badge--error   { background: var(--red); }
+.tab-badge--warning { background: #CC8800; }
 
 .tab-content {
   display: none;
