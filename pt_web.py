@@ -643,12 +643,18 @@ async def api_stop_trader_xk(exchange: str):
 
 @app.post("/api/train-all")
 async def api_train_all():
+    cs = ctrl.status_summary()
+    if cs["thinker_running"] or cs["trader_running"]:
+        return {"ok": False, "error": "Stop trader and thinker before training"}
     results = ctrl.train_all()
     return {"ok": True, "results": results}
 
 
 @app.post("/api/train/{coin}")
 async def api_train_coin(coin: str):
+    cs = ctrl.status_summary()
+    if cs["thinker_running"] or cs["trader_running"]:
+        return {"ok": False, "error": "Stop trader and thinker before training"}
     ok = ctrl.start_training(coin.upper())
     return {"ok": ok}
 

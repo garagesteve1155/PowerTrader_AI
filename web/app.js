@@ -1764,7 +1764,8 @@ function renderTraining(coins) {
       </div>`;
     const btn = $('#btn-train-all-tab');
     if (btn) btn.addEventListener('click', async () => {
-      await apiPost('train-all');
+      const res = await apiPost('train-all');
+      if (res && !res.ok) alert(res.error || 'Training failed');
     });
   }
 
@@ -1836,7 +1837,31 @@ function renderTraining(coins) {
 
 function updateTrainingBadges(coins) {
   if (!coins) return;
+
+  // Re-render fully if any coin is missing from the DOM
+  const rendered = new Set([...document.querySelectorAll('[data-train-coin]')].map(el => el.dataset.trainCoin));
+  if (coins.some(c => !rendered.has(c.coin))) { renderTraining(coins); return; }
+
   const locked = state.thinkerRunning || state.traderRunning;
+  const anyTraining = coins.some(c => c.training_running);
+
+  // Keep header in sync on every poll
+  const header = $('#training-header');
+  if (header) {
+    const badge = header.querySelector('.dm-state-badge');
+    if (badge) {
+      const stateLabel = anyTraining ? 'Training' : (locked ? 'Locked' : 'Idle');
+      const stateClass = anyTraining ? 'backfill' : (locked ? 'stopped' : 'normal');
+      badge.className = `dm-state-badge dm-state-${stateClass}`;
+      badge.textContent = stateLabel;
+    }
+    const btn = header.querySelector('#btn-train-all-tab');
+    if (btn) {
+      btn.disabled = locked;
+      btn.title = locked ? 'Stop trader and thinker before training' : '';
+    }
+  }
+
   for (const c of coins) {
     const row = document.querySelector(`[data-train-coin="${c.coin}"]`);
     if (!row) continue;
@@ -1867,7 +1892,8 @@ window.closeCoinPosition = async function(coin, xk) {
 };
 
 window.trainCoin = async function(coin) {
-  await apiPost(`train/${coin}`);
+  const res = await apiPost(`train/${coin}`);
+  if (res && !res.ok) { alert(res.error || 'Training failed'); return; }
   setTimeout(loadAndRenderTraining, 1000);
 };
 
