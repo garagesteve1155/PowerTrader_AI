@@ -1488,6 +1488,8 @@ async function loadTradeHistory() {
     (data.trades[xk] || []).forEach(t => allTrades.push({...t, _xk: xk}));
   });
 
+  allTrades = allTrades.filter(t => t.side !== 'skip');
+
   const filter = state.historyFilterCoin;
   if (filter) allTrades = allTrades.filter(t => (t.symbol || '').startsWith(filter + '_'));
 
@@ -1528,14 +1530,14 @@ async function loadTradeHistory() {
     const pnlCell = hasPnl
       ? `<span class="hist-pnl ${pnlClass}">${fmtPct(t.pnl_pct)}</span>
          ${t.realized_profit_usd != null ? `<span class="hist-pnl ${pnlClass}">${fmtSignedUSD2(t.realized_profit_usd)}</span>` : ''}`
-      : (isSkip ? `<span class="hist-reason">${t.reason || ''}</span>` : '');
+      : '';
 
     return `<tr class="${rowCls}" data-coin="${coin}">
       <td class="trades-td hist-time">${fmtDateTime(t.ts)}</td>
       <td class="trades-td"><span class="hist-xk" style="color:${xkC}">${xkShortLabel(t._xk)}</span></td>
       <td class="trades-td"><span class="hist-side ${t.side}">${t.side}</span></td>
-      <td class="trades-td">${pair} ${isSkip ? '' : `${fmtQty(t.qty, coin)} @ ${fmtPrice(t.price)}`} ${tagHtml}</td>
-      <td class="trades-td hist-amount">${isSkip ? '' : fmtUSD(t.notional_usd)}</td>
+      <td class="trades-td">${pair} ${fmtQty(t.qty, coin)} @ ${fmtPrice(t.price)} ${tagHtml}</td>
+      <td class="trades-td hist-amount">${fmtUSD(t.notional_usd)}</td>
       <td class="trades-td">${pnlCell}</td>
     </tr>`;
   }
