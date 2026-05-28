@@ -258,33 +258,40 @@ async def api_coins():
         positions_by_xk[xk] = ts.get("positions", {})
 
     for coin in env.coins:
-        cm = CoinModel(env, coin)
-        snap = cm.snapshot()
+        try:
+            cm = CoinModel(env, coin)
+            snap = cm.snapshot()
 
-        snap["positions"] = {}
-        mid_prices = []
-        for xk in active:
-            ts = status_by_xk[xk]
-            pos = positions_by_xk[xk].get(coin, {})
-            snap["positions"][xk] = pos if pos.get("quantity", 0) > 0 else None
-            _ts_val = ts.get("timestamp", 0) or 0
-            _ts_f = utc_to_ts(_ts_val) if isinstance(_ts_val, str) else float(_ts_val)
-            age = _now - _ts_f
-            if age > _PRICE_STALE_SEC:
-                continue
-            buy = pos.get("current_buy_price", 0)
-            sell = pos.get("current_sell_price", 0)
-            mid = (buy + sell) / 2 if (buy and sell) else buy or sell
-            if mid > 0:
-                mid_prices.append(mid)
+            snap["positions"] = {}
+            mid_prices = []
+            for xk in active:
+                ts = status_by_xk[xk]
+                pos = positions_by_xk[xk].get(coin, {})
+                snap["positions"][xk] = pos if pos.get("quantity", 0) > 0 else None
+                _ts_val = ts.get("timestamp", 0) or 0
+                try:
+                    _ts_f = utc_to_ts(_ts_val) if isinstance(_ts_val, str) else float(_ts_val)
+                except Exception:
+                    _ts_f = 0.0
+                age = _now - _ts_f
+                if age > _PRICE_STALE_SEC:
+                    continue
+                buy = pos.get("current_buy_price", 0)
+                sell = pos.get("current_sell_price", 0)
+                mid = (buy + sell) / 2 if (buy and sell) else buy or sell
+                if mid > 0:
+                    mid_prices.append(mid)
 
-        if mid_prices:
-            _last_mid_price[coin] = mid_prices[0]
-        snap["mid_price"] = _last_mid_price.get(coin, 0)
-        snap["training_running"] = ctrl_status["training"].get(coin, {}).get("running", False)
-        fail = cm.training_failure()
-        if fail and fail.get("exception_type"):
-            snap["training_failure"] = fail
+            if mid_prices:
+                _last_mid_price[coin] = mid_prices[0]
+            snap["mid_price"] = _last_mid_price.get(coin, 0)
+            snap["training_running"] = ctrl_status["training"].get(coin, {}).get("running", False)
+            fail = cm.training_failure()
+            if fail and fail.get("exception_type"):
+                snap["training_failure"] = fail
+        except Exception as e:
+            snap = {"coin": coin, "training_state": "UNKNOWN", "is_trained": False,
+                    "last_trained_ts": 0, "training_running": False, "positions": {}, "mid_price": 0}
         coins.append(snap)
     return {"coins": coins}
 

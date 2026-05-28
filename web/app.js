@@ -306,9 +306,10 @@ async function refreshAll() {
     populateLogSourceDropdown();
 
     if ($('#tab-compare').classList.contains('active')) loadCompare();
-    if ($('#tab-training').classList.contains('active')) renderTraining(coinsData.coins);
-    else if (!$('#training-list').querySelector('.train-row')) renderTraining(coinsData.coins);
-    else updateTrainingBadges(coinsData.coins);
+    if (coinsData.coins) {
+      if (!$('#training-list').querySelector('.train-row')) renderTraining(coinsData.coins);
+      else updateTrainingBadges(coinsData.coins);
+    }
   } catch (e) {
     console.error('refreshAll failed:', e);
   }
@@ -1735,7 +1736,8 @@ function renderLTH() {
 async function loadAndRenderTraining() {
   try {
     const data = await api('coins');
-    renderTraining(data.coins || state.coins || []);
+    const coins = (data && data.coins) || state.coins;
+    if (coins) renderTraining(coins);
   } catch (e) {
     console.error('loadAndRenderTraining failed:', e);
     if (state.coins) renderTraining(state.coins);
