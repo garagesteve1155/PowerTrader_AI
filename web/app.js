@@ -306,7 +306,8 @@ async function refreshAll() {
     populateLogSourceDropdown();
 
     if ($('#tab-compare').classList.contains('active')) loadCompare();
-    if (!$('#training-list').querySelector('.train-row')) renderTraining(coinsData.coins);
+    if ($('#tab-training').classList.contains('active')) renderTraining(coinsData.coins);
+    else if (!$('#training-list').querySelector('.train-row')) renderTraining(coinsData.coins);
     else updateTrainingBadges(coinsData.coins);
   } catch (e) {
     console.error('refreshAll failed:', e);
@@ -1734,9 +1735,10 @@ function renderLTH() {
 async function loadAndRenderTraining() {
   try {
     const data = await api('coins');
-    if (data.coins) renderTraining(data.coins);
+    renderTraining(data.coins || state.coins || []);
   } catch (e) {
     console.error('loadAndRenderTraining failed:', e);
+    if (state.coins) renderTraining(state.coins);
   }
 }
 
@@ -1838,9 +1840,9 @@ function renderTraining(coins) {
 function updateTrainingBadges(coins) {
   if (!coins) return;
 
-  // Re-render fully if any coin is missing from the DOM
+  // Re-render fully if the count differs or any coin is missing from the DOM
   const rendered = new Set([...document.querySelectorAll('[data-train-coin]')].map(el => el.dataset.trainCoin));
-  if (coins.some(c => !rendered.has(c.coin))) { renderTraining(coins); return; }
+  if (rendered.size !== coins.length || coins.some(c => !rendered.has(c.coin))) { renderTraining(coins); return; }
 
   const locked = state.thinkerRunning || state.traderRunning;
   const anyTraining = coins.some(c => c.training_running);
