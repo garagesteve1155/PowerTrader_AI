@@ -1309,8 +1309,9 @@ async function updateChartTradeMarkers(coin) {
 
     if (allTrades.length === 0) { state.candleSeries.setMarkers([]); return; }
 
-    const markers = allTrades.map(t => {
+    const markers = allTrades.flatMap(t => {
       const side = (t.side || '').toLowerCase();
+      if (side === 'skip') return [];
       const tag = (t.tag || '').toUpperCase();
       let label, color, shape, position;
 
@@ -1326,7 +1327,7 @@ async function updateChartTradeMarkers(coin) {
         position = 'aboveBar';
       }
 
-      return { time: Math.floor(t.ts), position, color, shape, text: label };
+      return [{ time: Math.floor(t.ts), position, color, shape, text: label }];
     });
 
     markers.sort((a, b) => a.time - b.time);
