@@ -2485,24 +2485,26 @@ function _rebuildErrorComponentFilter(entries) {
   if (current) sel.value = current;
 }
 
-let _errorsBadgeCount = 0;
-function _updateErrorsBadge(n) {
+let _badgeErrors = 0;
+let _badgeWarnings = 0;
+function _updateErrorsBadge() {
   const btn = $('[data-tab="errors"]');
   if (!btn) return;
-  if (n > 0) {
-    btn.dataset.badge = n > 99 ? '99+' : String(n);
+  const total = _badgeErrors + _badgeWarnings;
+  if (total > 0) {
+    btn.dataset.badge = total > 99 ? '99+' : String(total);
     btn.classList.add('has-badge');
+    btn.classList.toggle('badge-warn', _badgeErrors === 0);
   } else {
     btn.removeAttribute('data-badge');
-    btn.classList.remove('has-badge');
+    btn.classList.remove('has-badge', 'badge-warn');
   }
 }
 
 function onNewErrorEvent(entry) {
-  if (entry.level === 'error') {
-    _errorsBadgeCount++;
-    _updateErrorsBadge(_errorsBadgeCount);
-  }
+  if (entry.level === 'error') _badgeErrors++;
+  else if (entry.level === 'warning') _badgeWarnings++;
+  _updateErrorsBadge();
   const errTab = $('#tab-errors');
   if (errTab && errTab.classList.contains('active')) {
     loadErrors();
@@ -2580,8 +2582,9 @@ function setupTabs() {
         state.logRefreshTimer = setInterval(refreshLogs, 3000);
       }
       if (tab === 'errors') {
-        _errorsBadgeCount = 0;
-        _updateErrorsBadge(0);
+        _badgeErrors = 0;
+        _badgeWarnings = 0;
+        _updateErrorsBadge();
         loadErrors();
       }
     });

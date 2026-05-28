@@ -1079,6 +1079,7 @@ body {
   text-align: center;
   pointer-events: none;
 }
+.tab-btn.has-badge.badge-warn::after { background: #e8900a; }
 
 .tab-content {
   display: none;
