@@ -1595,7 +1595,23 @@ class CryptoAPITrading:
             log.exception("pending order reconciliation failed")
 
     def _record_skip(self, symbol: str, reason: str) -> None:
-        """Emit a skipped-buy warning to the error panel (throttled to once per 10 min per symbol+reason)."""
+        """Write a skip entry to trade history and emit a warning to the error panel (throttled to once per 10 min)."""
+        entry = {
+            "ts": utcnow(),
+            "side": "skip",
+            "tag": "SKIP",
+            "symbol": symbol,
+            "qty": 0,
+            "price": None,
+            "notional_usd": None,
+            "reason": reason,
+        }
+        try:
+            with open(TRADE_HISTORY_PATH, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, default=str) + "\n")
+        except Exception as e:
+            log.warning(f"could not write skip record for {symbol}: {e}")
+
         key = f"{symbol}|{reason}"
         now = time.time()
         if now - self._skip_throttle.get(key, 0.0) < 600:

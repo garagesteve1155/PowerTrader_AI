@@ -198,7 +198,11 @@ class AccountModel:
         return data or {}
 
     def trade_history(self, limit: int = 250) -> list[dict]:
-        return [_norm_ts(r) for r in _read_jsonl(self.env.trade_history_path(self.exchange), limit)]
+        all_rows = _read_jsonl(self.env.trade_history_path(self.exchange), limit=0)
+        rows = [r for r in all_rows if r.get("side") != "skip"]
+        if limit > 0:
+            rows = rows[-limit:]
+        return [_norm_ts(r) for r in rows]
 
     def account_value_history(self, limit: int = 500) -> list[dict]:
         return [_norm_ts(r) for r in _read_jsonl(self.env.account_history_path(self.exchange), limit)]
