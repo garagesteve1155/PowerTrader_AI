@@ -1798,7 +1798,11 @@ function renderTraining(coins) {
     let failHtml = '';
     if (fail && fail.exception_type) {
       const esc = s => String(s).replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      const utc = ts => ts ? new Date(ts * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z/, ' UTC') : '—';
+      const utc = ts => {
+        if (!ts) return '—';
+        if (typeof ts === 'string') return ts.replace('T', ' ').replace('Z', ' UTC');
+        return new Date(ts * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z/, ' UTC');
+      };
       const tsKeys = new Set(['start_time', 'end_time']);
       const fmtVal = (k, v) => tsKeys.has(k) && /^\d{9,}$/.test(String(v)) ? utc(Number(v)) : esc(v);
       const stateRows = fail.trainer_state ? Object.entries(fail.trainer_state)
