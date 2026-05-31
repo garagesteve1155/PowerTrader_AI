@@ -15,9 +15,7 @@ import marimo
 __generated_with = "0.23.5"
 app = marimo.App(width="medium")
 
-
-@app.cell
-def _imports():
+with app.setup:
     import glob
     import os
 
@@ -25,11 +23,10 @@ def _imports():
     import marimo as mo
     import numpy as np
     import pandas as pd
-    return alt, glob, mo, np, os, pd
 
 
 @app.cell
-def _run_picker(glob, mo, os):
+def _run_picker():
     runs = sorted(glob.glob("backtest/runs/*"))
     run_ids = [os.path.basename(p) for p in runs if os.path.isdir(p)]
     if run_ids:
@@ -46,7 +43,7 @@ def _run_picker(glob, mo, os):
 
 
 @app.cell
-def _load(pd, run_picker):
+def _load(run_picker):
     if run_picker is None:
         portfolio_h = pd.DataFrame()
         daily = pd.DataFrame()
@@ -66,7 +63,7 @@ def _load(pd, run_picker):
 
 
 @app.cell
-def _equity_curve(alt, mo, portfolio_h):
+def _equity_curve(portfolio_h):
     if portfolio_h.empty:
         equity_chart = mo.md(
             "*No `portfolio_hourly.parquet` yet — run "
@@ -91,7 +88,7 @@ def _equity_curve(alt, mo, portfolio_h):
 
 
 @app.cell
-def _daily_summary(daily, mo, np):
+def _daily_summary(daily):
     if daily.empty or "daily_pct_return" not in daily.columns:
         daily_stats = mo.md("*No daily series.*")
     else:
@@ -113,7 +110,7 @@ def _daily_summary(daily, mo, np):
 
 
 @app.cell
-def _daily_hist(alt, daily, mo):
+def _daily_hist(daily):
     if daily.empty or "daily_pct_return" not in daily.columns:
         hist_chart = mo.md("")
     else:
@@ -142,7 +139,7 @@ def _daily_hist(alt, daily, mo):
 
 
 @app.cell
-def _sweep_panel(glob, os, pd, run_id):
+def _sweep_panel(run_id):
     """If the loaded run is a sweep, gather sub-run final returns."""
     sibling_globs = (
         sorted(glob.glob(f"backtest/runs/{run_id}__*"))
@@ -172,7 +169,7 @@ def _sweep_panel(glob, os, pd, run_id):
 
 
 @app.cell
-def _sweep_heatmap(alt, mo, sweep_df):
+def _sweep_heatmap(sweep_df):
     if sweep_df.empty:
         sweep_chart = mo.md("*No sweep sub-runs detected for this run.*")
     else:
