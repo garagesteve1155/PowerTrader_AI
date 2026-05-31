@@ -73,6 +73,9 @@ class TrainerConfig:
     data_source: str = "kucoin"
     reprocess: bool = True
     verbose: bool = False
+    # No-look-ahead cutoff (Unix seconds). When set, fetch_candles excludes
+    # any row with timestamp >= asof_ts. Default None preserves prod behavior.
+    asof_ts: Optional[float] = None
 
     @classmethod
     def from_args(cls, argv: list = None) -> "TrainerConfig":
@@ -140,7 +143,8 @@ class TrainerConfig:
 
 
 def fetch_candles(
-    coin: str, tf_name: str, tf_minutes: int, source: str
+    coin: str, tf_name: str, tf_minutes: int, source: str,
+    asof_ts: Optional[float] = None,
 ) -> pd.DataFrame:
     """Fetch OHLCV data, returning a DataFrame with columns [open, high, low, close].
 
@@ -148,12 +152,22 @@ def fetch_candles(
       kucoin_local          — local ArcticDB store (state/historic_data/kucoin)
       kucoin/binance/kraken — shared ArcticDB store, falls back to live KuCoin API
       kucoin_live_api       — KuCoin REST API directly (skips ArcticDB)
+
+    asof_ts: optional no-look-ahead cutoff (Unix seconds). When set, only rows
+    with timestamp < asof_ts are returned. Pushed down to ArcticDB via
+    date_range. Not supported when falling back to the live KuCoin REST API.
     Returns oldest-first ordering.
     """
     if source != "kucoin_live_api":
-        df = _fetch_from_arctic(coin, tf_minutes, source)
+        df = _fetch_from_arctic(coin, tf_minutes, source, asof_ts=asof_ts)
         if df is not None and len(df) >= MIN_CANDLES:
             return df
+
+    if asof_ts is not None:
+        raise InsufficientDataError(
+            f"asof_ts requires ArcticDB data; live KuCoin fallback rejected "
+            f"for {coin} on {tf_name} (source='{source}')."
+        )
 
     df = _fetch_from_kucoin_live(coin, tf_name, tf_minutes)
     if df is not None and len(df) >= MIN_CANDLES:
@@ -166,7 +180,8 @@ def fetch_candles(
 
 
 def _fetch_from_arctic(
-    coin: str, tf_minutes: int, source: str
+    coin: str, tf_minutes: int, source: str,
+    asof_ts: Optional[float] = None,
 ) -> Optional[pd.DataFrame]:
     """Read candles from ArcticDB library."""
     if source == "kucoin_local":
@@ -190,7 +205,11 @@ def _fetch_from_arctic(
             return None
         symbol = alt
 
-    df = lib.read(symbol).data
+    if asof_ts is not None:
+        cutoff = pd.Timestamp(asof_ts, unit="s", tz="UTC") - pd.Timedelta(microseconds=1)
+        df = lib.read(symbol, date_range=(None, cutoff)).data
+    else:
+        df = lib.read(symbol).data
     if df is None or df.empty:
         return None
 
@@ -679,7 +698,8 @@ class TrainingLoop:
 
         for phase_idx, (fetch_tf, fetch_min, fraction) in enumerate(phases):
             df = fetch_candles(
-                self.config.coin, fetch_tf, fetch_min, self.config.data_source
+                self.config.coin, fetch_tf, fetch_min, self.config.data_source,
+                asof_ts=self.config.asof_ts,
             )
 
             opens = df["open"].values
