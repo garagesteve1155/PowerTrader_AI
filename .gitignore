@@ -10,3 +10,6 @@ r_secret.txt
 __pycache__/
 *.pyc
 powertrader.tar.gz
+
+# Backtest run artifacts (training_data.json snapshots, fill logs, series)
+backtest/runs/
