@@ -287,6 +287,17 @@ class CryptoAPITrading:
         self._last_history_write_ts = 0.0
         self._last_notify_summary_ts = 0.0
 
+    # ── Time / sleep seams ────────────────────────────────────────────────
+    # Backtest subclasses override these to run on a simulated clock with
+    # no-op sleep. In production these are direct passthroughs — behavior
+    # is identical to inline time.time() / time.sleep() calls.
+
+    def _now(self) -> float:
+        return time.time()
+
+    def _sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
     def _atomic_read_json(self, path: str) -> Optional[dict]:
         """
         Read JSON dict safely. Returns None on any failure.
@@ -1589,7 +1600,7 @@ class CryptoAPITrading:
                     log.warning(
                         f"[Reconcile] no progress, retrying ({retries}/{MAX_RETRIES})"
                     )
-                    time.sleep(1)
+                    self._sleep(1)
 
         except Exception:
             log.exception("pending order reconciliation failed")
@@ -1613,7 +1624,7 @@ class CryptoAPITrading:
             log.warning(f"could not write skip record for {symbol}: {e}")
 
         key = f"{symbol}|{reason}"
-        now = time.time()
+        now = self._now()
         if now - self._skip_throttle.get(key, 0.0) < 600:
             return
         self._skip_throttle[key] = now
@@ -2152,7 +2163,7 @@ class CryptoAPITrading:
         if not base:
             return 0
 
-        now = float(now_ts if now_ts is not None else time.time())
+        now = float(now_ts if now_ts is not None else self._now())
         cutoff = now - float(getattr(self, "dca_window_seconds", 86400))
         last_sell = float(self._dca_last_sell_ts.get(base, 0.0) or 0.0)
 
@@ -2165,7 +2176,7 @@ class CryptoAPITrading:
         base = str(base_symbol).upper().strip()
         if not base:
             return
-        t = float(ts if ts is not None else time.time())
+        t = float(ts if ts is not None else self._now())
         self._dca_buy_ts.setdefault(base, []).append(t)
         self._dca_window_count(base, now_ts=t)  # prune in-place
 
@@ -2176,7 +2187,7 @@ class CryptoAPITrading:
         if not base:
             return
         if sold:
-            self._dca_last_sell_ts[base] = float(ts if ts is not None else time.time())
+            self._dca_last_sell_ts[base] = float(ts if ts is not None else self._now())
         self._dca_buy_ts[base] = []
 
     # ------------------------------------------------------------------
@@ -2384,7 +2395,7 @@ class CryptoAPITrading:
         return result
 
     def manage_trades(self):
-        _mt_start = time.time()
+        _mt_start = self._now()
         trades_made = False  # Flag to track if any trade was made in this iteration
 
         # Hot-reload coins list + paths + trade params from GUI settings while running
@@ -2448,9 +2459,9 @@ class CryptoAPITrading:
             if full not in symbols:
                 symbols.append(full)
 
-        _t_price = time.time()
+        _t_price = self._now()
         current_buy_prices, current_sell_prices, valid_symbols = self.get_price(symbols)
-        _price_dur = time.time() - _t_price
+        _price_dur = self._now() - _t_price
 
         # Calculate total account value (robust: never drop a held coin to $0 on transient API misses)
         snapshot_ok = True
@@ -3011,7 +3022,7 @@ class CryptoAPITrading:
                             self._reset_dca_window_for_trade(symbol, sold=True)
                             self.dca_levels_triggered[symbol] = []
                             log.info(f"Sold {quantity} {symbol}")
-                            time.sleep(5)
+                            self._sleep(5)
                             holdings = self.get_holdings()
                             continue
 
@@ -3284,7 +3295,7 @@ class CryptoAPITrading:
                 log.info(
                     f"New trade {full_symbol} long={buy_count} short={sell_count} alloc=${allocation_in_usd:.2f}"
                 )
-                time.sleep(5)
+                self._sleep(5)
                 holdings = self.get_holdings()
                 holding_full_symbols = []
                 for h in holdings.get("results", []):
@@ -3315,7 +3326,7 @@ class CryptoAPITrading:
 
         # If any trades were made, recalculate the cost basis
         if trades_made:
-            time.sleep(5)
+            self._sleep(5)
             log.info("Trades made — recalculating cost basis")
             new_cost_basis = self.calculate_cost_basis()
             if new_cost_basis:
@@ -3347,7 +3358,7 @@ class CryptoAPITrading:
             }
             self._write_trader_status(status)
 
-            now = time.time()
+            now = self._now()
             if now - self._last_history_write_ts >= 300:
                 self._last_history_write_ts = now
                 self._append_jsonl(
@@ -3364,7 +3375,7 @@ class CryptoAPITrading:
 
         # Positions summary notification (configurable interval)
         try:
-            now = time.time()
+            now = self._now()
             _interval_min = int(_pt_env.get_config().get("ntfy_summary_interval_minutes") or 60)
             _summary_interval = max(5, _interval_min) * 60 if _interval_min > 0 else 0
             if _summary_interval > 0 and now - self._last_notify_summary_ts >= _summary_interval:
@@ -3381,7 +3392,7 @@ class CryptoAPITrading:
         except Exception as e:
             log.debug(f"exchange.tick() failed: {e}")
 
-        _mt_total = time.time() - _mt_start
+        _mt_total = self._now() - _mt_start
         if _mt_total > 5 or not hasattr(self, "_mt_logged"):
             self._mt_logged = True
             log.debug(f"loop total={_mt_total:.1f}s prices={_price_dur:.1f}s")
