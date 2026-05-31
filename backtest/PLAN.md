@@ -77,11 +77,36 @@ Goal: explore a 3D parameter space `(trade_start_level, start_allocation_pct, pm
 - No commit of strategy refactor yet — pricesource lands as standalone PR.
 - **Validation:** run prod thinker for a few cycles, compare output files vs. main branch baseline.
 
-### Phase 1 — strategy extraction (real prod touch, behavior-preserving)
-- Pull entry / DCA / PM / sell logic out of `Trader.manage_trades` into pure functions in `pt_strategy.py`.
-- Keep state explicit: pass dataclasses or dicts in/out, no instance attribute mutation inside the pure layer.
-- `pt_trader.py` becomes the I/O / orchestration shell that calls these.
-- **Validation:** run prod trader against demo exchange for a few hours, diff trader_status.json vs baseline. Goal: zero behavioral diff.
+### Phase 1 — BacktestTrader subclass (revised after reading prod code)
+
+**Revised approach.** Initial plan was to extract decision logic into `pt_strategy.py`
+pure functions. After reading `manage_trades` end-to-end, the decision logic is
+one ~520-line per-symbol loop with interleaved entry/DCA/PM/sell logic and
+no existing tests. A pure-function extraction would be high-effort and
+high-risk on untested code.
+
+**New approach:** subclass `Trader` and override only the I/O boundary methods.
+The 520-line decision loop runs in backtest exactly as in production — bit
+identical by construction, not by validation. Production code remains the
+source of truth.
+
+`backtest/trader.py`:
+- `BacktestTrader(Trader)` with overrides:
+  - `get_holdings()`, `get_price()`, `_get_buying_power()` → backed by replay state
+  - file-path methods → redirect to backtest workspace
+  - notification methods → no-op
+- Add a `step(now_ts: float)` driver that invokes `manage_trades()` once
+  per 5min bar with the simulated clock pre-set.
+
+`pt_trader.py` minimal prod changes:
+- Add a `clock` injection seam: replace `time.time()` with `self._clock.now()`
+  in `manage_trades` and helpers. Default `_clock` returns wall time → prod
+  unchanged.
+- Gate or no-op the threading.Thread / notification spawns under a flag.
+
+Expected prod touch: ~10–30 lines, all behavior-preserving. **Validation:**
+diff `trader_status.json` from a live demo run before/after; expect zero
+content delta.
 
 ### Phase 2 — trainer asof support
 - Add `asof_ts` to `train_for_coin` and `fetch_candles`. Default = None (current behavior).
