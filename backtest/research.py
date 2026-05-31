@@ -20,13 +20,12 @@ app = marimo.App(width="medium")
 def _imports():
     import glob
     import os
-    from pathlib import Path
 
     import altair as alt
     import marimo as mo
     import numpy as np
     import pandas as pd
-    return Path, alt, glob, mo, np, os, pd
+    return alt, glob, mo, np, os, pd
 
 
 @app.cell
