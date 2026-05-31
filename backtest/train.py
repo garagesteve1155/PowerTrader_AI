@@ -46,7 +46,14 @@ def earliest_viable_asof(
     df = price_source.get_candles(coin, ONE_WEEK_MINUTES)
     if len(df) < MIN_CANDLES:
         return None
-    return df.index[MIN_CANDLES - 1].to_pydatetime().replace(tzinfo=df.index.tz)
+    # asof is an *exclusive* cutoff, so to include the 100th bar we need a
+    # timestamp strictly after it. Use the bar boundary that opens the next
+    # week (index[MIN_CANDLES]) so MIN_CANDLES bars are visible to the trainer.
+    if len(df) > MIN_CANDLES:
+        return df.index[MIN_CANDLES].to_pydatetime().replace(tzinfo=df.index.tz)
+    # Exactly MIN_CANDLES bars: use the last bar's timestamp + 1 week
+    last = df.index[-1]
+    return (last + pd.Timedelta(minutes=ONE_WEEK_MINUTES)).to_pydatetime().replace(tzinfo=df.index.tz)
 
 
 def epoch_schedule(

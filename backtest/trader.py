@@ -24,6 +24,8 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+import logging
+
 import pt_trader
 from pt_trader import (
     CryptoAPITrading,
@@ -32,6 +34,12 @@ from pt_trader import (
     MAX_DCA_BUYS_PER_24H,
 )
 from pt_env import utcnow
+
+# Backtest runs at ~6Hz of decisions per second; the prod trader logs an
+# "Account:" snapshot every cycle. Mute it to keep output readable. Errors
+# and warnings still propagate.
+logging.getLogger("trader-demo").setLevel(logging.WARNING)
+logging.getLogger("trader-kraken").setLevel(logging.WARNING)
 
 from .exchange import BacktestExchange
 

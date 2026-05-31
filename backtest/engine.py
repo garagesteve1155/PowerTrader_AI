@@ -240,6 +240,12 @@ def run_coin(
             high_bounds, low_bounds = bt_thinker.rebuild_bounds(
                 new_high_tf, new_low_tf, new_perfects,
             )
+            # Defensive pad in case rebuild collapsed duplicates
+            n_tfs = len(TF_NAMES)
+            if len(high_bounds) < n_tfs:
+                high_bounds = list(high_bounds) + [99999999999999999] * (n_tfs - len(high_bounds))
+            if len(low_bounds) < n_tfs:
+                low_bounds = list(low_bounds) + [0.0] * (n_tfs - len(low_bounds))
 
             # Long price levels for the trader (dedup + sort desc, like prod _read_long_price_levels)
             uniq = {round(v, 12): v for v in low_bounds if v is not None}

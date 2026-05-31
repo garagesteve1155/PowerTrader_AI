@@ -251,18 +251,21 @@ def rebuild_bounds(
         og_index += 1
         gap_modifier += 0.25
 
-    # Restore to original TF order
+    # Restore to original TF order. When duplicate placeholders collapse
+    # the index lookup (e.g. multiple inactive TFs), pad with the original
+    # placeholder values so the output stays length n — matches what
+    # pt_thinker does via _pad_to_len after this routine.
     out_low: list[float] = []
     out_high: list[float] = []
     for og_index in range(n):
         try:
             out_low.append(sorted_low[og_low_index_list.index(og_index)])
         except ValueError:
-            pass
+            out_low.append(INACTIVE_LOW)
         try:
             out_high.append(sorted_high[og_high_index_list.index(og_index)])
         except ValueError:
-            pass
+            out_high.append(INACTIVE_HIGH)
     return out_high, out_low
 
 

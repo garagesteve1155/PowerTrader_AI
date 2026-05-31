@@ -40,7 +40,10 @@ def cmd_pilot(args):
     run_id = ws.new_run_id(prefix=f"pilot_{coin}")
     print(f"run_id = {run_id}")
 
-    sched = list(epoch_schedule(coin, pd.Timestamp.utcnow().tz_localize("UTC"), src))
+    now_utc = pd.Timestamp.utcnow()
+    if now_utc.tz is None:
+        now_utc = now_utc.tz_localize("UTC")
+    sched = list(epoch_schedule(coin, now_utc, src))
     if args.epochs:
         sched = sched[: args.epochs]
     if not sched:
@@ -53,10 +56,17 @@ def cmd_pilot(args):
         train_one_epoch(run_id, coin, asof.timestamp())
     print(f"training elapsed: {time.time()-t0:.1f}s")
 
+    # Bound `until` to the end of the last requested epoch so pilots stay short.
+    if args.epochs:
+        epoch_end = sched[-1] + pd.Timedelta(days=14)
+        until = min(epoch_end, now_utc)
+    else:
+        until = None
+
     cfg = CoinRunConfig(
         coin=coin,
         starting_usd=args.starting_usd,
-        until=None,
+        until=until,
         record_every_n=12,
         params=BacktestParams(
             trade_start_level=args.lvl,
@@ -89,7 +99,9 @@ def cmd_sweep(args):
     coin = args.coin.upper()
     run_id = ws.new_run_id(prefix=f"sweep_{coin}")
     print(f"sweep run_id = {run_id}")
-    until = pd.Timestamp.utcnow().tz_localize("UTC")
+    until = pd.Timestamp.utcnow()
+    if until.tz is None:
+        until = until.tz_localize("UTC")
     grid = default_grid()
     print(f"grid size: {len(grid)} param points × coin '{coin}'  ({'parallel' if not args.serial else 'serial'})")
 
