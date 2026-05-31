@@ -1886,7 +1886,6 @@ class CryptoAPITrading:
                 avg_cost_basis=avg_cost_basis, pnl_pct=pnl_pct,
                 notional_usd=notional_usd, tag=tag,
                 buying_power=bp,
-                account_history_path=ACCOUNT_VALUE_HISTORY_PATH,
             )
         except Exception:
             pass
@@ -3372,8 +3371,7 @@ class CryptoAPITrading:
                 self._last_notify_summary_ts = now
                 import pt_notify
                 pt_notify.notify_positions_summary(
-                    positions, status["account"], ACCOUNT_VALUE_HISTORY_PATH,
-                    exchange=EXCHANGE_KEY,
+                    positions, status["account"], exchange=EXCHANGE_KEY,
                 )
         except Exception:
             pass
