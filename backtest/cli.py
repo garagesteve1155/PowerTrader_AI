@@ -1,19 +1,146 @@
 """
-Command-line driver for the backtest pipeline.
+Command-line driver for the PowerTrader backtest pipeline.
 
-Subcommands:
-  pilot       Train + run a single coin for a short window (validation).
-  run         Train + run a single coin over full history with default params.
-  sweep       3D parameter sweep on one or more coins.
-  aggregate   Build hourly/daily series from existing run artifacts.
+Pipeline overview
+-----------------
+Each invocation does some subset of:
+  1) Training. For each coin × 14-day epoch in the schedule, invoke
+     pt_trainer with asof_ts set so no post-epoch data leaks in. Output:
+       runs/<run_id>/training/<YYYYMMDD>/<COIN>/training_data.json
+  2) Replay. Walk the 5min kucoin5 grid, score the 7 trained TFs at each
+     bar, vote, drive a BacktestTrader subclass of the prod Trader, and
+     record fills/snapshots. Output:
+       runs/<run_id>/fills/<COIN>.parquet
+       runs/<run_id>/series/<COIN>.parquet
+  3) Aggregation. Resample snapshots to hourly, sum to portfolio level,
+     derive daily % returns. Output:
+       runs/<run_id>/agg/<COIN>_hourly.parquet
+       runs/<run_id>/agg/portfolio_hourly.parquet
+       runs/<run_id>/agg/portfolio_daily.parquet
 
-Examples:
-  python3 -m backtest.cli pilot   --coin ETH --epochs 2
-  python3 -m backtest.cli run     --coin ETH
-  python3 -m backtest.cli sweep   --coin ETH
-  python3 -m backtest.cli aggregate <run_id> --coins ETH
+The runs/ directory is gitignored. All steps are resumable: if a
+training_data.json or fills/series parquet already exists for a given
+(run, coin, asof), it is reused and the step is skipped.
 
-Run IDs land under backtest/runs/<run_id>/. The runs dir is gitignored.
+Subcommands
+-----------
+pilot
+    Train + run a single coin (or list, or all configured coins) for a
+    bounded number of 14-day epochs. The replay window is capped at the
+    end of the last requested epoch so pilots stay short (~13s/epoch).
+    Use this to validate end-to-end before launching a full run.
+
+run
+    Same as `pilot` but with no `--epochs` cap — replays from each coin's
+    earliest viable date up to "now". Hours of compute for one coin's
+    full ~6-year history; days for all 30 coins serially. Resume any
+    interrupted run via --run-id.
+
+sweep
+    3D parameter sweep over (trade_start_level, start_allocation_pct,
+    pm_start_pct). 350 param points × N coins. Trains each coin's
+    epoch schedule once (param-independent), then runs an independent
+    backtest per (coin, params) via Ray when available, serial fallback
+    with --serial.
+
+aggregate
+    Build hourly + daily aggregations from existing fill/series parquets
+    in a run. Run after pilot/run/sweep to populate the agg/ subdir that
+    backtest/research.py reads.
+
+Common options
+--------------
+--coin <symbol>
+    Single coin (e.g. ETH).
+--coin <a,b,c>
+    Comma-separated list (e.g. BTC,ETH,SOL).
+--coin (omitted on pilot/run)
+    Default to every coin in pt_config.json. Multi-coin runs are serial,
+    one coin at a time. Each coin gets its own $1000 starting capital and
+    its own subtree under runs/<run_id>/.
+
+--run-id <existing>
+    Resume an existing run (pilot/run only). The trainer skips epochs
+    whose training_data.json is already on disk; the engine skips epochs
+    with no training_data.json. So passing the same --run-id picks up
+    exactly where the previous invocation stopped.
+
+--epochs N
+    pilot only. Trains and replays the first N epochs of the schedule.
+    Defaults to 2. Omit (use `run` instead) to do all epochs.
+
+--lvl, --alloc, --pm
+    Inline sweep parameters for pilot/run only. Defaults match the prod
+    pt_config.json values (lvl=2, alloc=1%, pm=4%).
+
+--starting-usd N
+    Starting cash per coin. Default 1000.
+
+--serial (sweep only)
+    Disable Ray. Run all 350 param points sequentially. Useful when Ray
+    isn't installed or for deterministic single-machine timing.
+
+Examples
+--------
+Single-coin pilot, 2 epochs (~25s):
+    python3 -m backtest.cli pilot --coin ETH --epochs 2
+
+Full single-coin replay (one coin, all history):
+    python3 -m backtest.cli run --coin ETH
+
+Resume an interrupted run by re-issuing the command with --run-id:
+    python3 -m backtest.cli run --coin ETH --run-id pilot_ETH_20260601_072651
+
+Three coins, full history, into one run_id directory tree:
+    python3 -m backtest.cli run --coin BTC,ETH,SOL
+
+All 30 configured coins, full history:
+    python3 -m backtest.cli run
+
+3D sweep, one coin (350 backtests, Ray-parallel by default):
+    python3 -m backtest.cli sweep --coin ETH
+
+Aggregate after a multi-coin run:
+    python3 -m backtest.cli aggregate <run_id> --coins BTC,ETH,SOL
+
+Then explore the Marimo notebook:
+    /home/dave/app/anaconda3/envs/dev/bin/marimo edit backtest/research.py
+
+Output layout
+-------------
+runs/<run_id>/
+  training/<YYYYMMDD>/<COIN>/training_data.json    # one per 14-day epoch
+  training/<YYYYMMDD>/<COIN>/trainer_state.json
+  fills/<COIN>.parquet                             # chronological fill log
+  series/<COIN>.parquet                            # per-5min state snapshots
+  agg/<COIN>_hourly.parquet                        # hourly per-coin
+  agg/portfolio_hourly.parquet                     # hourly portfolio sum
+  agg/portfolio_wide_hourly.parquet                # per-coin matrix
+  agg/portfolio_daily.parquet                      # daily + daily_pct_return
+
+Sweep sub-runs land in sibling directories named
+runs/<run_id>__<COIN>__l<L>_a<A>_p<P>/. The Marimo notebook picks them
+up automatically and renders a (lvl × alloc) heatmap averaged over pm.
+
+Failure handling
+----------------
+- Each epoch's training is isolated. If pt_trainer crashes on a specific
+  (coin, asof), the CLI prints `FAIL -- <error>` for that epoch and moves
+  on to the next.
+- The end-of-loop summary lists (trained, skipped, failed) counts and a
+  block of every failed epoch with its error message.
+- The engine skips epochs whose training_data.json doesn't exist
+  (because training failed). The trader keeps using the previous epoch's
+  training for that 14-day window.
+
+Safety
+------
+- **Do not run two trainers against the same `--run-id` concurrently.**
+  There is no file locking. Two processes writing to the same
+  training_data.json or series parquet will corrupt it.
+- The runs/ directory is gitignored; nothing under it should be committed.
+- Prod state at /mnt/d/dave/Documents/powertrader/powertrader_demo/state/
+  is read-only — never write there from the backtest.
 """
 
 from __future__ import annotations
