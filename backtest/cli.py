@@ -239,14 +239,138 @@ def cmd_pilot(args):
         print("no coins to run")
         return
 
-    if len(coins) > 1:
-        print(f"running {len(coins)} coins: {', '.join(coins)}")
-        for c in coins:
-            args.coin = c
-            _cmd_pilot_one(args)
-            print()
+    if len(coins) == 1:
+        _cmd_pilot_one(args)
         return
-    _cmd_pilot_one(args)
+
+    # Multi-coin: each coin is an independent path-dependent backtest.
+    # Fan out across coins via Ray when available. Within a coin, replay
+    # stays internally sequential (path-dependent across epochs).
+    serial = bool(getattr(args, "serial", False))
+    run_id = args.run_id or ws.new_run_id(prefix="pilot")
+    print(f"running {len(coins)} coins: {', '.join(coins)}"
+          f"   (run_id = {run_id}{'  resuming' if args.run_id else ''})")
+    cfg_dict = {
+        "run_id": run_id,
+        "lvl": args.lvl,
+        "alloc": float(args.alloc),
+        "pm": float(args.pm),
+        "starting_usd": float(args.starting_usd),
+        "epochs": args.epochs,
+    }
+
+    if not serial:
+        try:
+            import ray  # type: ignore
+        except ImportError:
+            print("[cmd_pilot] Ray not installed — falling back to serial")
+            serial = True
+
+    if serial:
+        for c in coins:
+            print(f"\n── {c} ──")
+            args.coin = c
+            args.run_id = run_id
+            _cmd_pilot_one(args)
+        return
+
+    import ray  # type: ignore
+    if not ray.is_initialized():
+        ray.init(ignore_reinit_error=True, log_to_driver=False)
+    remote = ray.remote(_pilot_worker)
+    futures = [remote.remote(c, cfg_dict) for c in coins]
+    results = ray.get(futures)
+    print("\n=== per-coin summary ===")
+    for r in results:
+        if r.get("error"):
+            print(f"  {r['coin']:<5}  ERROR: {r['error']}")
+        else:
+            print(f"  {r['coin']:<5}  trained={r['n_trained']} skipped={r['n_skipped']} "
+                  f"failed={r['n_failed']}  epochs_used={r['epochs_used']} "
+                  f"fills={r['fills']}  snapshots={r['snapshots']}  "
+                  f"return={r['pct_return']:+.2f}%")
+
+
+def _pilot_worker(coin: str, cfg: dict) -> dict:
+    """Top-level picklable worker for one coin. Returns a small summary dict.
+
+    Each Ray worker is its own process. The pt_trader globals it mutates
+    here are local to the worker.
+    """
+    import time as _time
+    import pandas as _pd
+    import pt_trader as _pt
+    from .train import epoch_schedule as _epoch_schedule
+    from .train import train_one_epoch as _train_one_epoch
+    from .engine import (
+        BacktestParams as _BP, CoinRunConfig as _Cfg, run_coin as _run_coin,
+    )
+
+    out = {"coin": coin.upper(), "error": None}
+    try:
+        _pt.TRADE_START_LEVEL = int(cfg["lvl"])
+        _pt.START_ALLOC_PCT = float(cfg["alloc"])
+        _pt.PM_START_PCT_NO_DCA = float(cfg["pm"])
+        _pt.PM_START_PCT_WITH_DCA = float(cfg["pm"])
+        _pt.crypto_symbols = [coin.upper()]
+        _pt.LONG_TERM_SYMBOLS = set()
+        _pt.EXCLUDED_COINS = set()
+
+        src = ArcticPriceSource()
+        now_utc = _pd.Timestamp.utcnow()
+        if now_utc.tz is None:
+            now_utc = now_utc.tz_localize("UTC")
+        sched = list(_epoch_schedule(coin, now_utc, src))
+        if cfg.get("epochs"):
+            sched = sched[: cfg["epochs"]]
+        if not sched:
+            out["error"] = "no viable epochs"
+            return out
+
+        n_skip = n_fail = 0
+        for asof in sched:
+            ed = ws.training_epoch_dir(cfg["run_id"], asof.timestamp(), coin)
+            existed = (ed / "training_data.json").exists()
+            r = _train_one_epoch(cfg["run_id"], coin, asof.timestamp())
+            if existed and r.ok:
+                n_skip += 1
+            elif not r.ok:
+                n_fail += 1
+        out["n_skipped"] = n_skip
+        out["n_failed"] = n_fail
+        out["n_trained"] = len(sched) - n_skip - n_fail
+
+        until = (
+            min(sched[-1] + _pd.Timedelta(days=14), now_utc)
+            if cfg.get("epochs") else None
+        )
+        rc = _Cfg(
+            coin=coin.upper(),
+            starting_usd=float(cfg["starting_usd"]),
+            until=until,
+            record_every_n=12,
+            params=_BP(
+                trade_start_level=int(cfg["lvl"]),
+                start_allocation_pct=float(cfg["alloc"]),
+                pm_start_pct=float(cfg["pm"]),
+            ),
+        )
+        engine_t0 = _time.time()
+        res = _run_coin(cfg["run_id"], rc, epoch_schedule=sched, price_source=src)
+        out["engine_elapsed_s"] = _time.time() - engine_t0
+        out["epochs_used"] = res.epochs_used
+        out["fills"] = len(res.fills)
+        out["snapshots"] = len(res.series)
+        if res.series is not None and len(res.series):
+            first = float(res.series.iloc[0]["total_account_value"])
+            last = float(res.series.iloc[-1]["total_account_value"])
+            out["pct_return"] = (last / first - 1.0) * 100.0 if first else 0.0
+        else:
+            out["pct_return"] = 0.0
+        return out
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+        return out
 
 
 def _cmd_pilot_one(args):
@@ -435,6 +559,8 @@ def main():
     pilot.add_argument("--starting-usd", type=float, default=1000.0)
     pilot.add_argument("--run-id", default=None,
                        help="Existing run_id to resume (default: new timestamped)")
+    pilot.add_argument("--serial", action="store_true",
+                       help="Disable Ray; run coins sequentially")
     pilot.set_defaults(func=cmd_pilot)
 
     run = sub.add_parser("run", help="Full single-coin run, default params")
@@ -447,6 +573,8 @@ def main():
     run.add_argument("--starting-usd", type=float, default=1000.0)
     run.add_argument("--run-id", default=None,
                      help="Existing run_id to resume (default: new timestamped)")
+    run.add_argument("--serial", action="store_true",
+                     help="Disable Ray; run coins sequentially")
     run.set_defaults(func=cmd_run)
 
     train = sub.add_parser(
