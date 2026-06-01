@@ -3,45 +3,76 @@ Command-line driver for the PowerTrader backtest pipeline.
 
 Pipeline overview
 -----------------
-Each invocation does some subset of:
-  1) Training. For each coin × 14-day epoch in the schedule, invoke
-     pt_trainer with asof_ts set so no post-epoch data leaks in. Output:
+The pipeline factors into three independent stages, all sharing one
+`run_id` directory tree:
+
+  1) Training. For each coin × 14-day epoch, invoke pt_trainer with
+     asof_ts set so no post-epoch data leaks in. Param-independent —
+     produced once, reused across every replay below.
        runs/<run_id>/training/<YYYYMMDD>/<COIN>/training_data.json
-  2) Replay. Walk the 5min kucoin5 grid, score the 7 trained TFs at each
-     bar, vote, drive a BacktestTrader subclass of the prod Trader, and
-     record fills/snapshots. Output:
+       runs/<run_id>/training/<YYYYMMDD>/<COIN>/trainer_state.json
+
+  2) Replay. Walk the 5min kucoin5 grid, score the 7 trained TFs at
+     each bar, vote, drive a BacktestTrader subclass of the prod
+     Trader, and record fills + state snapshots. Per (coin, params).
        runs/<run_id>/fills/<COIN>.parquet
        runs/<run_id>/series/<COIN>.parquet
-  3) Aggregation. Resample snapshots to hourly, sum to portfolio level,
-     derive daily % returns. Output:
+
+  3) Aggregation. Resample snapshots to hourly, sum to portfolio
+     level, derive daily % returns.
        runs/<run_id>/agg/<COIN>_hourly.parquet
        runs/<run_id>/agg/portfolio_hourly.parquet
        runs/<run_id>/agg/portfolio_daily.parquet
 
-The runs/ directory is gitignored. All steps are resumable: if a
+The runs/ directory is gitignored. Every stage is resumable: if a
 training_data.json or fills/series parquet already exists for a given
 (run, coin, asof), it is reused and the step is skipped.
 
+The recommended large-scale workflow is to run stages explicitly so the
+expensive training phase is done once and shared:
+
+    # Phase A — produce all training data, Ray-parallel
+    python3 -m backtest.cli train
+
+    # Phase B — default-params replay over the same training
+    python3 -m backtest.cli run    --run-id <phase_a_run_id>
+
+    # Phase C — 3D sweep over the same training
+    python3 -m backtest.cli sweep  --run-id <phase_a_run_id>
+
+`pilot` and `run` will also train missing epochs on the fly if you skip
+Phase A, but their training is per-coin serial — slower than `train`.
+
 Subcommands
 -----------
+train
+    Produce training_data.json for every (coin × epoch). Ray-parallel
+    across the full grid by default (one Ray task per epoch). No replay
+    is performed. Use this as Phase A before launching `run` or `sweep`
+    against the same --run-id so they reuse the cached training instead
+    of doing it again per-coin.
+
 pilot
     Train + run a single coin (or list, or all configured coins) for a
     bounded number of 14-day epochs. The replay window is capped at the
     end of the last requested epoch so pilots stay short (~13s/epoch).
-    Use this to validate end-to-end before launching a full run.
+    Use this to validate end-to-end before launching a full run. Training
+    inside pilot is per-coin serial; pass --run-id to a previous `train`
+    output to skip it entirely.
 
 run
     Same as `pilot` but with no `--epochs` cap — replays from each coin's
     earliest viable date up to "now". Hours of compute for one coin's
-    full ~6-year history; days for all 30 coins serially. Resume any
-    interrupted run via --run-id.
+    full ~6-year history; days for all 30 coins serially. Pass --run-id
+    to resume or to reuse a `train` artifact.
 
 sweep
     3D parameter sweep over (trade_start_level, start_allocation_pct,
-    pm_start_pct). 350 param points × N coins. Trains each coin's
-    epoch schedule once (param-independent), then runs an independent
-    backtest per (coin, params) via Ray when available, serial fallback
-    with --serial.
+    pm_start_pct). 350 param points × N coins. Each coin's training
+    schedule is (re)materialised via train_grid (Ray-parallel across
+    epochs) before fanning out a replay task per (coin, params) — also
+    Ray-parallel. Pass --run-id to reuse an existing `train` output.
+    `--serial` disables Ray for both phases.
 
 aggregate
     Build hourly + daily aggregations from existing fill/series parquets
@@ -54,20 +85,23 @@ Common options
     Single coin (e.g. ETH).
 --coin <a,b,c>
     Comma-separated list (e.g. BTC,ETH,SOL).
---coin (omitted on pilot/run)
-    Default to every coin in pt_config.json. Multi-coin runs are serial,
-    one coin at a time. Each coin gets its own $1000 starting capital and
-    its own subtree under runs/<run_id>/.
+--coin (omitted on train/pilot/run)
+    Default to every coin in pt_config.json. Each coin gets its own
+    $1000 starting capital and its own subtree under runs/<run_id>/.
+    Multi-coin runs are serial (pilot/run); train fans out across the
+    whole coin × epoch grid via Ray.
 
 --run-id <existing>
-    Resume an existing run (pilot/run only). The trainer skips epochs
-    whose training_data.json is already on disk; the engine skips epochs
-    with no training_data.json. So passing the same --run-id picks up
-    exactly where the previous invocation stopped.
+    Resume / reuse an existing run. The trainer skips epochs whose
+    training_data.json is already on disk; the engine skips epochs with
+    no training_data.json. So passing the same --run-id picks up exactly
+    where the previous invocation stopped, or composes Phase A + Phase B.
 
 --epochs N
-    pilot only. Trains and replays the first N epochs of the schedule.
-    Defaults to 2. Omit (use `run` instead) to do all epochs.
+    Cap the schedule to the first N 14-day epochs per coin.
+    train: caps the training grid.
+    pilot: caps both training and replay (default 2).
+    Omit on `run` to do all viable epochs per coin.
 
 --lvl, --alloc, --pm
     Inline sweep parameters for pilot/run only. Defaults match the prod
@@ -76,20 +110,34 @@ Common options
 --starting-usd N
     Starting cash per coin. Default 1000.
 
---serial (sweep only)
-    Disable Ray. Run all 350 param points sequentially. Useful when Ray
-    isn't installed or for deterministic single-machine timing.
+--serial
+    train and sweep accept this flag. Disables Ray; runs every task
+    sequentially. Useful when Ray isn't installed, when debugging a
+    single task, or for deterministic timing.
 
 Examples
 --------
-Single-coin pilot, 2 epochs (~25s):
+Phase A — train everything, Ray-parallel (≈ 25 min on 24 cores for the
+full universe of 30 coins × ~173 epochs):
+    python3 -m backtest.cli train
+
+Phase A subset — train BTC + ETH + SOL only:
+    python3 -m backtest.cli train --coin BTC,ETH,SOL
+
+Phase A resume — re-launch with the same run-id; skip-if-done picks up:
+    python3 -m backtest.cli train --run-id train_20260601_081535
+
+Phase B — default-params replay reusing Phase A training:
+    python3 -m backtest.cli run --run-id train_20260601_081535
+
+Phase C — 3D sweep reusing Phase A training:
+    python3 -m backtest.cli sweep --coin ETH --run-id train_20260601_081535
+
+One-shot pilot for quick validation (2 epochs, single coin, ~25s):
     python3 -m backtest.cli pilot --coin ETH --epochs 2
 
-Full single-coin replay (one coin, all history):
+One-shot single-coin full replay (does its own training inline):
     python3 -m backtest.cli run --coin ETH
-
-Resume an interrupted run by re-issuing the command with --run-id:
-    python3 -m backtest.cli run --coin ETH --run-id pilot_ETH_20260601_072651
 
 Three coins, full history, into one run_id directory tree:
     python3 -m backtest.cli run --coin BTC,ETH,SOL
@@ -97,13 +145,13 @@ Three coins, full history, into one run_id directory tree:
 All 30 configured coins, full history:
     python3 -m backtest.cli run
 
-3D sweep, one coin (350 backtests, Ray-parallel by default):
-    python3 -m backtest.cli sweep --coin ETH
+Resume an interrupted run by re-issuing the command with --run-id:
+    python3 -m backtest.cli run --coin ETH --run-id pilot_ETH_20260601_072651
 
 Aggregate after a multi-coin run:
     python3 -m backtest.cli aggregate <run_id> --coins BTC,ETH,SOL
 
-Then explore the Marimo notebook:
+Then explore in the Marimo notebook:
     /home/dave/app/anaconda3/envs/dev/bin/marimo edit backtest/research.py
 
 Output layout
@@ -126,18 +174,33 @@ Failure handling
 ----------------
 - Each epoch's training is isolated. If pt_trainer crashes on a specific
   (coin, asof), the CLI prints `FAIL -- <error>` for that epoch and moves
-  on to the next.
-- The end-of-loop summary lists (trained, skipped, failed) counts and a
-  block of every failed epoch with its error message.
+  on to the next. Per-coin and total trained/skipped/failed counts are
+  reported at the end, followed by a block listing every failed epoch
+  with its error.
+- pt_trainer's failure paths use `sys.exit(1)`. train_one_epoch catches
+  the resulting SystemExit and returns ok=False instead of aborting the
+  whole CLI (Ctrl-C / KeyboardInterrupt still propagates normally).
 - The engine skips epochs whose training_data.json doesn't exist
   (because training failed). The trader keeps using the previous epoch's
   training for that 14-day window.
+
+Parallelism
+-----------
+- `train` and `sweep` fan out over Ray when it's installed. Each Ray
+  worker is its own OS process with its own CWD, so the chdir inside
+  train_one_epoch can't collide between concurrent epochs.
+- The ArcticDB lmdb store is read-only here and supports unlimited
+  concurrent readers across processes.
+- Within a single process, training is serial (Ray runs each task in
+  its own worker).
 
 Safety
 ------
 - **Do not run two trainers against the same `--run-id` concurrently.**
   There is no file locking. Two processes writing to the same
-  training_data.json or series parquet will corrupt it.
+  training_data.json or series parquet will corrupt it. Resume *across*
+  separate sequential invocations is fine — that's serialised by the
+  process boundary plus the skip-if-done check.
 - The runs/ directory is gitignored; nothing under it should be committed.
 - Prod state at /mnt/d/dave/Documents/powertrader/powertrader_demo/state/
   is read-only — never write there from the backtest.
