@@ -42,9 +42,19 @@ def earliest_viable_asof(
 ) -> Optional[pd.Timestamp]:
     """First timestamp at which `coin` has MIN_CANDLES weekly bars available.
 
-    Returns None if the coin doesn't have enough 1w history yet.
+    Returns None when the coin can't be trained yet:
+      - 1w library is missing the symbol (e.g. not backfilled),
+      - fewer than MIN_CANDLES weekly bars exist.
+
+    Callers should treat None as "skip this coin" — the train_grid loop
+    yields no epochs and the coin appears with 0 in the summary.
     """
-    df = price_source.get_candles(coin, ONE_WEEK_MINUTES)
+    try:
+        df = price_source.get_candles(coin, ONE_WEEK_MINUTES)
+    except Exception:
+        # Missing library or missing symbol — both surface as ArcticDB
+        # exceptions. Either way the coin isn't viable here.
+        return None
     if len(df) < MIN_CANDLES:
         return None
     # asof is an *exclusive* cutoff, so to include the 100th bar we need a
@@ -191,13 +201,21 @@ def train_grid(
     # Build the full task list across coins
     tasks: list[tuple[str, float]] = []
     schedules: dict[str, list[pd.Timestamp]] = {}
+    untrainable: list[str] = []
     for coin in coins:
         sched = list(epoch_schedule(coin, until, price_source))
+        if not sched:
+            untrainable.append(coin)
         if epochs_per_coin is not None:
             sched = sched[:epochs_per_coin]
         schedules[coin] = sched
         for asof in sched:
             tasks.append((coin, asof.timestamp()))
+
+    if untrainable:
+        print(f"[train_grid] skipping {len(untrainable)} coin(s) with no "
+              f"viable epochs (missing 1w data or <100 weekly bars): "
+              f"{', '.join(untrainable)}")
 
     if not tasks:
         return {c: [] for c in coins}

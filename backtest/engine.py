@@ -127,7 +127,14 @@ def run_coin(
     series: List[dict] = []
 
     # 5min price grid for the whole window (one query per coin)
-    grid = price_source.get_candles(coin, 5)
+    try:
+        grid = price_source.get_candles(coin, 5)
+    except Exception as e:
+        return CoinRunResult(
+            coin=coin, fills=pd.DataFrame(), series=pd.DataFrame(),
+            epochs_used=0,
+            error=f"no kucoin5 data for {coin}: {e}",
+        )
     if grid.empty:
         return CoinRunResult(
             coin=coin, fills=pd.DataFrame(), series=pd.DataFrame(),
