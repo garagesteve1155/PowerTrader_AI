@@ -48,6 +48,26 @@ class BacktestExchange(Exchange):
         return list(self._orders_log)
 
     # ------------------------------------------------------------------
+    # Checkpoint serialization (for resumable runs)
+    # ------------------------------------------------------------------
+
+    def to_state(self) -> dict:
+        """Pickle-friendly snapshot of all persistent state."""
+        return {
+            "denom":      self._denom,
+            "cash":       self._cash,
+            "holdings":   dict(self._holdings),
+            "orders_log": list(self._orders_log),
+        }
+
+    def load_state(self, s: dict) -> None:
+        """Restore from a `to_state()` dict. Per-bar fields stay transient."""
+        self._denom = s.get("denom", "USD")
+        self._cash = float(s["cash"])
+        self._holdings = dict(s["holdings"])
+        self._orders_log = list(s["orders_log"])
+
+    # ------------------------------------------------------------------
     # Required Exchange methods
     # ------------------------------------------------------------------
 

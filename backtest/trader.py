@@ -133,6 +133,40 @@ class BacktestTrader(CryptoAPITrading):
         )
 
     # ------------------------------------------------------------------
+    # Checkpoint serialization (for resumable runs)
+    # ------------------------------------------------------------------
+
+    def to_state(self) -> dict:
+        """Pickle-friendly snapshot of all persistent decision-loop state."""
+        import copy
+        return {
+            "pnl_ledger":           copy.deepcopy(self._pnl_ledger),
+            "cost_basis":           dict(self.cost_basis),
+            "trailing_pm":          copy.deepcopy(self.trailing_pm),
+            "dca_levels_triggered": copy.deepcopy(self.dca_levels_triggered),
+            "_dca_buy_ts":          copy.deepcopy(self._dca_buy_ts),
+            "_dca_last_sell_ts":    dict(self._dca_last_sell_ts),
+            "_skipped_coins":       set(self._skipped_coins),
+            "_skip_throttle":       dict(self._skip_throttle),
+            "trailing_settings_sig": tuple(self._last_trailing_settings_sig),
+        }
+
+    def load_state(self, s: dict) -> None:
+        """Restore from a `to_state()` dict."""
+        import copy
+        self._pnl_ledger = copy.deepcopy(s["pnl_ledger"])
+        self.cost_basis = dict(s["cost_basis"])
+        self.trailing_pm = copy.deepcopy(s["trailing_pm"])
+        self.dca_levels_triggered = copy.deepcopy(s["dca_levels_triggered"])
+        self._dca_buy_ts = copy.deepcopy(s["_dca_buy_ts"])
+        self._dca_last_sell_ts = dict(s["_dca_last_sell_ts"])
+        self._skipped_coins = set(s["_skipped_coins"])
+        self._skip_throttle = dict(s["_skip_throttle"])
+        self._last_trailing_settings_sig = tuple(
+            s.get("trailing_settings_sig", self._last_trailing_settings_sig)
+        )
+
+    # ------------------------------------------------------------------
     # Clock/sleep seam overrides
     # ------------------------------------------------------------------
 

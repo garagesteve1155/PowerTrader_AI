@@ -35,6 +35,7 @@ import pt_trader
 from pt_env import TRAIN_TF_MINUTES, TRAIN_TF_NAMES
 from pt_pricesource import ArcticPriceSource
 
+from . import checkpoint as ckpt
 from . import thinker as bt_thinker
 from . import workspace as ws
 from .exchange import BacktestExchange
@@ -125,6 +126,30 @@ def run_coin(
     state = bt_thinker.ThinkerState.fresh(len(TF_NAMES))
     fills: List[dict] = []
     series: List[dict] = []
+    resume_skip_until_ts: float = 0.0
+
+    # Try to resume from a previous checkpoint
+    _ckpt = ckpt.load(run_id, coin)
+    if _ckpt is not None:
+        try:
+            ex.load_state(_ckpt["exchange"])
+            trader.load_state(_ckpt["trader"])
+            state = bt_thinker.ThinkerState(**_ckpt["thinker"])
+            fills = list(_ckpt["fills"])
+            series = list(_ckpt["series"])
+            resume_skip_until_ts = float(_ckpt["last_completed_epoch_ts"])
+            _last_epoch_date = pd.Timestamp(
+                resume_skip_until_ts, unit="s", tz="UTC"
+            ).date()
+            print(f"[{coin}] resuming from checkpoint, last completed epoch: "
+                  f"{_last_epoch_date}  ({len(fills)} fills, {len(series)} snapshots)")
+        except Exception as e:
+            print(f"[{coin}] checkpoint load failed ({e}); starting fresh")
+            ex = BacktestExchange(starting_usd=cfg.starting_usd)
+            trader = BacktestTrader(ex)
+            state = bt_thinker.ThinkerState.fresh(len(TF_NAMES))
+            fills, series = [], []
+            resume_skip_until_ts = 0.0
 
     # 5min price grid for the whole window (one query per coin)
     try:
@@ -164,9 +189,14 @@ def run_coin(
     # Engine main loop: per epoch, walk 5min bars
     epochs_used = 0
     step_count = 0
+    fills_dir = ws.ensure_dir(ws.run_dir(run_id) / "fills")
+    series_dir = ws.ensure_dir(ws.run_dir(run_id) / "series")
     for ei, epoch_start in enumerate(epoch_schedule):
         # Load training_data for THIS epoch
         epoch_ts = epoch_start.timestamp()
+        # Resume: skip any epoch already completed in a previous run
+        if epoch_ts <= resume_skip_until_ts:
+            continue
         td_path = (
             ws.training_epoch_dir(run_id, epoch_ts, coin) / "training_data.json"
         )
@@ -298,12 +328,37 @@ def run_coin(
             state.high_bound_prices = high_bounds
             state.low_bound_prices = low_bounds
 
+        # ── End of epoch — flush checkpoint + parquets ────────────────
+        # Trader/exchange/thinker state are snapshotted before moving on,
+        # so a Ctrl-C or crash here loses at most one 14-day window.
+        try:
+            ckpt.save(
+                run_id=run_id, coin=coin,
+                last_completed_epoch_ts=epoch_ts,
+                exchange_state=ex.to_state(),
+                trader_state=trader.to_state(),
+                thinker_state={
+                    "high_tf_prices": list(state.high_tf_prices),
+                    "low_tf_prices": list(state.low_tf_prices),
+                    "high_bound_prices": list(state.high_bound_prices),
+                    "low_bound_prices": list(state.low_bound_prices),
+                    "perfects": list(state.perfects),
+                },
+                fills=fills,
+                series=series,
+            )
+            # Mirror to parquet for live inspection (cheap; sizes are small).
+            if fills:
+                pd.DataFrame(fills).to_parquet(fills_dir / f"{coin}.parquet")
+            if series:
+                pd.DataFrame(series).to_parquet(series_dir / f"{coin}.parquet")
+        except Exception as _save_err:
+            # Don't let a flush failure abort the run; log and continue.
+            print(f"[{coin}] checkpoint flush at epoch {epoch_start.date()} "
+                  f"failed: {_save_err}")
+
     fills_df = pd.DataFrame(fills)
     series_df = pd.DataFrame(series)
-
-    # Write outputs
-    fills_dir = ws.ensure_dir(ws.run_dir(run_id) / "fills")
-    series_dir = ws.ensure_dir(ws.run_dir(run_id) / "series")
     if not fills_df.empty:
         fills_df.to_parquet(fills_dir / f"{coin}.parquet")
     if not series_df.empty:
