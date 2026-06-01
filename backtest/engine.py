@@ -191,6 +191,12 @@ def run_coin(
     step_count = 0
     fills_dir = ws.ensure_dir(ws.run_dir(run_id) / "fills")
     series_dir = ws.ensure_dir(ws.run_dir(run_id) / "series")
+    import os as _os
+    _engine_pid = _os.getpid()
+    _engine_tag = f"[engine pid={_engine_pid} coin={coin}]"
+    print(f"{_engine_tag} bar-walk begin: {len(epoch_schedule)} epochs", flush=True)
+    import time as _time
+    _epoch_t0 = _time.time()
     for ei, epoch_start in enumerate(epoch_schedule):
         # Load training_data for THIS epoch
         epoch_ts = epoch_start.timestamp()
@@ -356,6 +362,14 @@ def run_coin(
             # Don't let a flush failure abort the run; log and continue.
             print(f"[{coin}] checkpoint flush at epoch {epoch_start.date()} "
                   f"failed: {_save_err}")
+
+        # Per-epoch progress beacon — visible in Ray worker .out file so
+        # a stuck replay can be pinpointed to a specific epoch.
+        _dt = _time.time() - _epoch_t0
+        print(f"{_engine_tag} epoch {ei + 1}/{len(epoch_schedule)} "
+              f"{epoch_start.date()} done in {_dt:.1f}s  "
+              f"fills={len(fills)} snapshots={len(series)}", flush=True)
+        _epoch_t0 = _time.time()
 
     fills_df = pd.DataFrame(fills)
     series_df = pd.DataFrame(series)

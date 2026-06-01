@@ -306,6 +306,16 @@ def _pilot_worker(coin: str, cfg: dict) -> dict:
         BacktestParams as _BP, CoinRunConfig as _Cfg, run_coin as _run_coin,
     )
 
+    import os as _os
+    pid = _os.getpid()
+    tag = f"[worker pid={pid} coin={coin.upper()}]"
+    # All log lines flushed immediately so Ray's per-worker .out captures
+    # them even if the worker hangs later — essential for diagnosing the
+    # "which coin is that stuck PID running?" case.
+    def _log(msg: str) -> None:
+        print(f"{tag} {msg}", flush=True)
+
+    _log("starting")
     out = {"coin": coin.upper(), "error": None}
     try:
         _pt.TRADE_START_LEVEL = int(cfg["lvl"])
@@ -323,10 +333,14 @@ def _pilot_worker(coin: str, cfg: dict) -> dict:
         sched = list(_epoch_schedule(coin, now_utc, src))
         if cfg.get("epochs"):
             sched = sched[: cfg["epochs"]]
+        _log(f"schedule resolved: {len(sched)} epochs")
         if not sched:
             out["error"] = "no viable epochs"
+            _log("EXIT no_viable_epochs")
             return out
 
+        _log(f"training phase begin: {sched[0].date()} → {sched[-1].date()}")
+        train_t0 = _time.time()
         n_skip = n_fail = 0
         for asof in sched:
             ed = ws.training_epoch_dir(cfg["run_id"], asof.timestamp(), coin)
@@ -339,6 +353,8 @@ def _pilot_worker(coin: str, cfg: dict) -> dict:
         out["n_skipped"] = n_skip
         out["n_failed"] = n_fail
         out["n_trained"] = len(sched) - n_skip - n_fail
+        _log(f"training phase done in {_time.time()-train_t0:.1f}s "
+             f"(trained={out['n_trained']} skipped={n_skip} failed={n_fail})")
 
         until = (
             min(sched[-1] + _pd.Timedelta(days=14), now_utc)
@@ -355,6 +371,7 @@ def _pilot_worker(coin: str, cfg: dict) -> dict:
                 pm_start_pct=float(cfg["pm"]),
             ),
         )
+        _log(f"replay phase begin: {len(sched)} epoch(s)")
         engine_t0 = _time.time()
         res = _run_coin(cfg["run_id"], rc, epoch_schedule=sched, price_source=src)
         out["engine_elapsed_s"] = _time.time() - engine_t0
@@ -367,9 +384,13 @@ def _pilot_worker(coin: str, cfg: dict) -> dict:
             out["pct_return"] = (last / first - 1.0) * 100.0 if first else 0.0
         else:
             out["pct_return"] = 0.0
+        _log(f"EXIT ok  replay_elapsed={out['engine_elapsed_s']:.1f}s  "
+             f"epochs_used={out['epochs_used']}  fills={out['fills']}  "
+             f"return={out['pct_return']:+.2f}%")
         return out
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"
+        _log(f"EXIT error  {out['error']}")
         return out
 
 
