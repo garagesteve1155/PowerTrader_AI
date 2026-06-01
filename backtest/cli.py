@@ -21,7 +21,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-from typing import List
+from typing import List, Optional
 
 import pandas as pd
 
@@ -34,11 +34,36 @@ from .sweep import _train_coin_phase, default_grid, run_coin_sweep
 from .train import epoch_schedule, train_one_epoch
 
 
+def _resolve_coins(arg_value: Optional[str]) -> list[str]:
+    """Parse --coin: comma-separated list, or all configured coins if blank."""
+    if arg_value:
+        return [c.strip().upper() for c in arg_value.split(",") if c.strip()]
+    # Default to pt_config.json coin universe
+    import pt_trader  # triggers config load
+    return [c.upper() for c in pt_trader.crypto_symbols]
+
+
 def cmd_pilot(args):
+    coins = _resolve_coins(args.coin)
+    if not coins:
+        print("no coins to run")
+        return
+
+    if len(coins) > 1:
+        print(f"running {len(coins)} coins: {', '.join(coins)}")
+        for c in coins:
+            args.coin = c
+            _cmd_pilot_one(args)
+            print()
+        return
+    _cmd_pilot_one(args)
+
+
+def _cmd_pilot_one(args):
     coin = args.coin.upper()
     src = ArcticPriceSource()
-    run_id = ws.new_run_id(prefix=f"pilot_{coin}")
-    print(f"run_id = {run_id}")
+    run_id = args.run_id or ws.new_run_id(prefix=f"pilot_{coin}")
+    print(f"[{coin}] run_id = {run_id}{'  (resuming)' if args.run_id else ''}")
 
     now_utc = pd.Timestamp.utcnow()
     if now_utc.tz is None:
@@ -52,9 +77,27 @@ def cmd_pilot(args):
 
     print(f"training {len(sched)} epochs: {sched[0].date()} → {sched[-1].date()}")
     t0 = time.time()
-    for asof in sched:
-        train_one_epoch(run_id, coin, asof.timestamp())
-    print(f"training elapsed: {time.time()-t0:.1f}s")
+    results = []
+    n_skipped = 0
+    for i, asof in enumerate(sched, 1):
+        epoch_dir = ws.training_epoch_dir(run_id, asof.timestamp(), coin)
+        was_done = (epoch_dir / "training_data.json").exists()
+        res = train_one_epoch(run_id, coin, asof.timestamp())
+        results.append(res)
+        if was_done and res.ok:
+            n_skipped += 1
+        status = "skip" if (was_done and res.ok) else ("ok" if res.ok else "FAIL")
+        print(f"  [{i}/{len(sched)}] {asof.date()}  {status}"
+              + (f"  -- {res.error}" if not res.ok else ""))
+    n_failed = sum(1 for r in results if not r.ok)
+    n_trained = len(results) - n_skipped - n_failed
+    print(f"training elapsed: {time.time()-t0:.1f}s  "
+          f"({n_trained} trained, {n_skipped} skipped, {n_failed} failed)")
+    if n_failed:
+        print(f"\n=== {n_failed} epoch(s) failed ===")
+        for r in results:
+            if not r.ok:
+                print(f"  {r.asof.date()}  {r.error}")
 
     # Bound `until` to the end of the last requested epoch so pilots stay short.
     if args.epochs:
@@ -132,20 +175,28 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pilot = sub.add_parser("pilot", help="Small validation run")
-    pilot.add_argument("--coin", required=True)
+    pilot.add_argument("--coin", default=None,
+                       help="Coin symbol, comma-separated list, "
+                            "or omit for all pt_config.json coins")
     pilot.add_argument("--epochs", type=int, default=2)
     pilot.add_argument("--lvl", type=int, default=2)
     pilot.add_argument("--alloc", type=float, default=1.0)
     pilot.add_argument("--pm", type=float, default=4.0)
     pilot.add_argument("--starting-usd", type=float, default=1000.0)
+    pilot.add_argument("--run-id", default=None,
+                       help="Existing run_id to resume (default: new timestamped)")
     pilot.set_defaults(func=cmd_pilot)
 
     run = sub.add_parser("run", help="Full single-coin run, default params")
-    run.add_argument("--coin", required=True)
+    run.add_argument("--coin", default=None,
+                     help="Coin symbol, comma-separated list, "
+                          "or omit for all pt_config.json coins")
     run.add_argument("--lvl", type=int, default=2)
     run.add_argument("--alloc", type=float, default=1.0)
     run.add_argument("--pm", type=float, default=4.0)
     run.add_argument("--starting-usd", type=float, default=1000.0)
+    run.add_argument("--run-id", default=None,
+                     help="Existing run_id to resume (default: new timestamped)")
     run.set_defaults(func=cmd_run)
 
     sweep = sub.add_parser("sweep", help="3D parameter sweep on one coin")

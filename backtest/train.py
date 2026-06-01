@@ -86,10 +86,23 @@ def train_one_epoch(
     coin: str,
     asof_ts: float,
     data_source: str = DEFAULT_SOURCE,
+    skip_if_done: bool = True,
 ) -> EpochResult:
-    """Run pt_trainer for a single (coin, asof) into the backtest workspace."""
+    """Run pt_trainer for a single (coin, asof) into the backtest workspace.
+
+    If `skip_if_done` and training_data.json already exists for this
+    (run, coin, asof), returns ok=True without re-running — enables
+    resume by passing the same run_id across invocations.
+
+    Catches both Exception and SystemExit (pt_trainer uses sys.exit on
+    failure, which would otherwise terminate the whole CLI). KeyboardInterrupt
+    still propagates so Ctrl-C works.
+    """
     asof = pd.Timestamp(asof_ts, unit="s", tz="UTC")
     epoch_dir = ws.training_epoch_dir(run_id, asof_ts, coin)
+
+    if skip_if_done and (epoch_dir / "training_data.json").exists():
+        return EpochResult(coin=coin.upper(), asof_ts=asof_ts, asof=asof, ok=True)
 
     config = TrainerConfig(
         coin=coin.upper(),
@@ -102,6 +115,13 @@ def train_one_epoch(
         with ws.chdir(epoch_dir):
             TrainingLoop(config).run()
         return EpochResult(coin=coin.upper(), asof_ts=asof_ts, asof=asof, ok=True)
+    except KeyboardInterrupt:
+        raise
+    except SystemExit as e:
+        return EpochResult(
+            coin=coin.upper(), asof_ts=asof_ts, asof=asof,
+            ok=False, error=f"SystemExit (pt_trainer sys.exit code={e.code})",
+        )
     except Exception as e:
         return EpochResult(
             coin=coin.upper(), asof_ts=asof_ts, asof=asof,
