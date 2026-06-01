@@ -34,6 +34,7 @@ class EpochResult:
     asof: pd.Timestamp
     ok: bool
     error: Optional[str] = None
+    skipped: bool = False  # training_data.json already existed at start
 
 
 def earliest_viable_asof(
@@ -102,7 +103,9 @@ def train_one_epoch(
     epoch_dir = ws.training_epoch_dir(run_id, asof_ts, coin)
 
     if skip_if_done and (epoch_dir / "training_data.json").exists():
-        return EpochResult(coin=coin.upper(), asof_ts=asof_ts, asof=asof, ok=True)
+        return EpochResult(
+            coin=coin.upper(), asof_ts=asof_ts, asof=asof, ok=True, skipped=True,
+        )
 
     config = TrainerConfig(
         coin=coin.upper(),
@@ -144,3 +147,80 @@ def train_coin(
     for asof in epoch_schedule(coin, until, price_source):
         results.append(train_one_epoch(run_id, coin, asof.timestamp(), data_source))
     return results
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Parallel training grid (coin × epoch). Independent units → Ray-parallel.
+#
+# Why this works safely under Ray:
+#  - Ray workers are separate OS processes; each has its own CWD, so the
+#    chdir in train_one_epoch can't collide.
+#  - The ArcticDB store is opened lmdb-mode and only READ here; lmdb
+#    supports unlimited concurrent readers across processes.
+#  - skip_if_done lets re-launches resume without redoing work.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _train_one_remote(
+    run_id: str, coin: str, asof_ts: float,
+    data_source: str = DEFAULT_SOURCE,
+) -> EpochResult:
+    """Top-level picklable target for Ray. Avoids capturing closures."""
+    return train_one_epoch(run_id, coin, asof_ts, data_source)
+
+
+def train_grid(
+    run_id: str,
+    coins: list[str],
+    until: pd.Timestamp,
+    parallel: bool = True,
+    epochs_per_coin: Optional[int] = None,
+    price_source: Optional[ArcticPriceSource] = None,
+    data_source: str = DEFAULT_SOURCE,
+) -> dict[str, list[EpochResult]]:
+    """Train every (coin × epoch) up to `until`.
+
+    Each (coin, asof) is an independent task and parallelizable across
+    Ray workers. Reuses existing training_data.json via skip_if_done.
+
+    Returns a dict mapping coin → list of EpochResult (asof-ordered).
+    """
+    if price_source is None:
+        price_source = ArcticPriceSource()
+
+    # Build the full task list across coins
+    tasks: list[tuple[str, float]] = []
+    schedules: dict[str, list[pd.Timestamp]] = {}
+    for coin in coins:
+        sched = list(epoch_schedule(coin, until, price_source))
+        if epochs_per_coin is not None:
+            sched = sched[:epochs_per_coin]
+        schedules[coin] = sched
+        for asof in sched:
+            tasks.append((coin, asof.timestamp()))
+
+    if not tasks:
+        return {c: [] for c in coins}
+
+    use_ray = parallel
+    if use_ray:
+        try:
+            import ray  # type: ignore
+        except ImportError:
+            print("[train_grid] Ray not installed — falling back to serial")
+            use_ray = False
+
+    if use_ray:
+        import ray  # type: ignore
+        if not ray.is_initialized():
+            ray.init(ignore_reinit_error=True, log_to_driver=False)
+        remote = ray.remote(_train_one_remote)
+        futures = [remote.remote(run_id, c, ts, data_source) for c, ts in tasks]
+        results: list[EpochResult] = ray.get(futures)
+    else:
+        results = [_train_one_remote(run_id, c, ts, data_source) for c, ts in tasks]
+
+    by_coin: dict[str, list[EpochResult]] = {c: [] for c in coins}
+    for (c, _), res in zip(tasks, results):
+        by_coin[c].append(res)
+    return by_coin

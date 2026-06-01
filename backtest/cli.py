@@ -158,7 +158,7 @@ from . import workspace as ws
 from . import aggregate as agg
 from .engine import BacktestParams, CoinRunConfig, run_coin
 from .sweep import _train_coin_phase, default_grid, run_coin_sweep
-from .train import epoch_schedule, train_one_epoch
+from .train import epoch_schedule, train_grid, train_one_epoch
 
 
 def _resolve_coins(arg_value: Optional[str]) -> list[str]:
@@ -265,6 +265,66 @@ def cmd_run(args):
     cmd_pilot(args)
 
 
+def cmd_train(args):
+    """Train-only phase: produce training_data.json for every (coin × epoch).
+
+    Independent across (coin, asof) tuples, so Ray-parallelizes cleanly.
+    Subsequent `run` / `sweep` invocations with the same --run-id will
+    pick up the cached training data via the skip-if-done logic.
+    """
+    coins = _resolve_coins(args.coin)
+    if not coins:
+        print("no coins to train")
+        return
+
+    src = ArcticPriceSource()
+    run_id = args.run_id or ws.new_run_id(prefix="train")
+    print(f"run_id = {run_id}{'  (resuming)' if args.run_id else ''}")
+    print(f"coins ({len(coins)}): {', '.join(coins)}")
+
+    now_utc = pd.Timestamp.utcnow()
+    if now_utc.tz is None:
+        now_utc = now_utc.tz_localize("UTC")
+
+    t0 = time.time()
+    by_coin = train_grid(
+        run_id=run_id,
+        coins=coins,
+        until=now_utc,
+        parallel=not args.serial,
+        epochs_per_coin=args.epochs,
+        price_source=src,
+    )
+    elapsed = time.time() - t0
+
+    # Per-coin summary
+    print(f"\nFinished in {elapsed:.1f}s "
+          f"({'serial' if args.serial else 'Ray-parallel'})")
+    failed_rows: list[tuple[str, str, str]] = []  # (coin, asof, error)
+    grand_trained = grand_skipped = grand_failed = 0
+    for coin, results in by_coin.items():
+        n_skip = sum(1 for r in results if r.skipped)
+        n_fail = sum(1 for r in results if not r.ok)
+        n_train = len(results) - n_skip - n_fail
+        grand_trained += n_train
+        grand_skipped += n_skip
+        grand_failed += n_fail
+        print(f"  {coin:<5}  {n_train:>4} trained, "
+              f"{n_skip:>4} skipped, {n_fail:>3} failed  "
+              f"(of {len(results)} epochs)")
+        for r in results:
+            if not r.ok:
+                failed_rows.append((coin, str(r.asof.date()), r.error or "?"))
+
+    print(f"  TOTAL  {grand_trained:>4} trained, "
+          f"{grand_skipped:>4} skipped, {grand_failed:>3} failed")
+
+    if failed_rows:
+        print(f"\n=== {len(failed_rows)} failed epoch(s) ===")
+        for coin, asof_str, err in failed_rows:
+            print(f"  {coin}  {asof_str}  {err}")
+
+
 def cmd_sweep(args):
     coin = args.coin.upper()
     run_id = ws.new_run_id(prefix=f"sweep_{coin}")
@@ -325,6 +385,22 @@ def main():
     run.add_argument("--run-id", default=None,
                      help="Existing run_id to resume (default: new timestamped)")
     run.set_defaults(func=cmd_run)
+
+    train = sub.add_parser(
+        "train",
+        help="Produce all training_data.json artifacts (Ray-parallel across "
+             "coin × epoch). Replay/sweep can then reuse via --run-id.",
+    )
+    train.add_argument("--coin", default=None,
+                       help="Coin symbol, comma-separated list, "
+                            "or omit for all pt_config.json coins")
+    train.add_argument("--epochs", type=int, default=None,
+                       help="Cap on epochs per coin (default: all viable)")
+    train.add_argument("--run-id", default=None,
+                       help="Existing run_id to resume (default: new timestamped)")
+    train.add_argument("--serial", action="store_true",
+                       help="Disable Ray; train coin × epoch sequentially")
+    train.set_defaults(func=cmd_train)
 
     sweep = sub.add_parser("sweep", help="3D parameter sweep on one coin")
     sweep.add_argument("--coin", required=True)

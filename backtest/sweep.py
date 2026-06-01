@@ -29,7 +29,7 @@ from pt_pricesource import ArcticPriceSource
 
 from . import workspace as ws
 from .engine import BacktestParams, CoinRunConfig, run_coin
-from .train import epoch_schedule, train_one_epoch
+from .train import epoch_schedule, train_grid, train_one_epoch
 
 
 def default_grid() -> List[BacktestParams]:
@@ -48,14 +48,15 @@ def default_grid() -> List[BacktestParams]:
 def _train_coin_phase(
     run_id: str, coin: str, until: pd.Timestamp,
     price_source: ArcticPriceSource,
+    parallel: bool = True,
 ) -> List[pd.Timestamp]:
-    """Train every epoch for `coin` up to `until`. Returns the schedule."""
+    """Train every epoch for `coin` up to `until` via train_grid (Ray-parallel
+    across epochs by default). Returns the schedule the engine should walk."""
     schedule = list(epoch_schedule(coin, until, price_source))
-    for asof in schedule:
-        td_path = ws.training_epoch_dir(run_id, asof.timestamp(), coin) / "training_data.json"
-        if td_path.exists():
-            continue
-        train_one_epoch(run_id, coin, asof.timestamp())
+    train_grid(
+        run_id=run_id, coins=[coin], until=until,
+        parallel=parallel, price_source=price_source,
+    )
     return schedule
 
 
