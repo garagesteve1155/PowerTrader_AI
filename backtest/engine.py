@@ -215,14 +215,14 @@ def run_coin(
                     continue
                 bar_start_unix = bar_start_for_tf(T, tf_min)
                 bar_start_ts = pd.Timestamp(bar_start_unix, unit="s", tz="UTC")
-                if bar_start_ts not in tf_df.index:
-                    # Find nearest preceding bar (cheap; tf_df sorted ascending)
-                    pos = tf_df.index.searchsorted(bar_start_ts, side="right") - 1
-                    if pos < 0:
-                        continue
-                    bar_row = tf_df.iloc[pos]
-                else:
-                    bar_row = tf_df.loc[bar_start_ts]
+                # Always use searchsorted + iloc — handles missing AND duplicated
+                # timestamps. `searchsorted(side="right") - 1` returns the index
+                # of the latest bar whose start is <= bar_start_ts. iloc returns
+                # exactly one Series regardless of duplicates.
+                pos = tf_df.index.searchsorted(bar_start_ts, side="right") - 1
+                if pos < 0:
+                    continue
+                bar_row = tf_df.iloc[pos]
                 open_p = float(bar_row["open"])
                 # close = current live (5min open at T); thinker semantics
                 hd, ld, status = bt_thinker.score_tf(parsed[tf_name], open_p, live_price)
