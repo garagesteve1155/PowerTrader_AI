@@ -36,7 +36,7 @@ def default_grid() -> List[BacktestParams]:
     grid = []
     for lvl in range(1, 8):
         for alloc in range(1, 6):
-            for pm in range(1, 11):
+            for pm in range(3, 11):
                 grid.append(BacktestParams(
                     trade_start_level=lvl,
                     start_allocation_pct=float(alloc),
