@@ -1987,19 +1987,58 @@ class CryptoAPITrading:
 
     def initialize_dca_levels(self):
         """
-        Initialize per-coin DCA stage state ONLY from the currently selected/current-trade BUY orders.
+        Initialize per-coin DCA stage state from the local bot-recorded trade history.
 
-        Rules:
-        - A fresh trade always starts at DCA stage 0 after the initial buy.
-        - During normal runtime, DCA stage should be maintained by incrementing in memory
-          when an actual DCA buy fills.
-        - This startup reconstruction exists ONLY so restarts can recover the current trade
-          after the hub's order-selection flow has identified which BUY orders belong to the
-          active trade.
-        - Therefore we count FILLED BUY orders whose IDs are in self._bot_order_ids[symbol].
-          We do NOT scan old sell history here and we do NOT infer stages from all bot-owned
-          historical orders.
+        Source: TRADE_HISTORY_PATH (jsonl, bot-only). For each coin, count buys tagged
+        "DCA" that occurred after the most recent sell. Previously this scanned the
+        Kraken `fetch_closed_orders` endpoint, which silently undercounts when the
+        exchange's order-history window doesn't reach back far enough — that caused
+        the stage counter to reset on restart and DCAs to refire past their levels.
         """
+        # Single pass over trade history → per-base DCA count since last sell.
+        dca_counts: Dict[str, int] = {}
+        last_sell_ts: Dict[str, float] = {}
+        dca_ts: Dict[str, List[float]] = {}
+
+        if os.path.isfile(TRADE_HISTORY_PATH):
+            try:
+                with open(TRADE_HISTORY_PATH, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = (line or "").strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except Exception:
+                            continue
+
+                        sym_full = str(obj.get("symbol", "")).upper().strip()
+                        base = sym_full.split("_")[0].strip() if sym_full else ""
+                        if not base:
+                            continue
+
+                        try:
+                            ts_f = utc_to_ts(obj.get("ts")) if obj.get("ts") else 0.0
+                        except Exception:
+                            ts_f = 0.0
+                        if not ts_f:
+                            continue
+
+                        side = str(obj.get("side", "")).lower()
+                        tag = str(obj.get("tag") or "").upper()
+
+                        if side == "sell":
+                            if ts_f > last_sell_ts.get(base, 0.0):
+                                last_sell_ts[base] = ts_f
+                        elif side == "buy" and tag == "DCA":
+                            dca_ts.setdefault(base, []).append(ts_f)
+            except Exception as e:
+                log.warning(f"initialize_dca_levels: trade history read failed: {e}")
+
+        for base, ts_list in dca_ts.items():
+            cutoff = last_sell_ts.get(base, 0.0)
+            dca_counts[base] = sum(1 for t in ts_list if t > cutoff)
+
         holdings = self.get_holdings()
         if not holdings or "results" not in holdings:
             log.info("No holdings found. Skipping DCA levels initialization.")
@@ -2022,62 +2061,9 @@ class CryptoAPITrading:
                 self.dca_levels_triggered[symbol] = []
                 continue
 
-            selected_ids = set()
-            try:
-                selected_ids = {
-                    str(x).strip()
-                    for x in (self._bot_order_ids.get(symbol, set()) or set())
-                    if str(x).strip()
-                }
-            except Exception:
-                selected_ids = set()
-
-            if not selected_ids:
-                self.dca_levels_triggered[symbol] = []
-                continue
-
-            full_symbol = f"{symbol}_USD"
-            orders = self.get_orders(full_symbol)
-            if not orders or "results" not in orders:
-                # API failure (e.g. rate-limit) — preserve current in-memory stage
-                # rather than silently zeroing it, which would trigger premature DCA.
-                current = len(self.dca_levels_triggered.get(symbol, []))
-                log.warning(f"initialize_dca_levels: get_orders failed for {symbol} — keeping stage {current}")
-                pt_errors.emit(
-                    f"trader-{EXCHANGE_KEY}",
-                    level="warning",
-                    message=f"Could not verify DCA stage for {symbol} — order fetch failed",
-                    detail=f"Kraken API did not return orders for {symbol} (rate limit or transient error). "
-                           f"DCA stage kept at {current} to avoid triggering a premature buy. "
-                           f"If the stage is wrong after recovery, restart the trader or trigger a hub reseed.",
-                )
-                continue
-
-            relevant_buy_orders = []
-            for order in orders.get("results", []):
-                try:
-                    if order.get("state") != "filled":
-                        continue
-                    if str(order.get("side") or "").lower().strip() != "buy":
-                        continue
-
-                    oid = str(order.get("id") or "").strip()
-                    if not oid or oid not in selected_ids:
-                        continue
-
-                    relevant_buy_orders.append(order)
-                except Exception:
-                    continue
-
-            if not relevant_buy_orders:
-                self.dca_levels_triggered[symbol] = []
-                continue
-
-            relevant_buy_orders.sort(key=lambda x: x.get("created_at") or "")
-
-            triggered_levels_count = max(0, len(relevant_buy_orders) - 1)
-            self.dca_levels_triggered[symbol] = list(range(triggered_levels_count))
-            log.debug(f"Initialized DCA stages for {symbol}: {triggered_levels_count}")
+            count = int(dca_counts.get(symbol, 0))
+            self.dca_levels_triggered[symbol] = list(range(count))
+            log.debug(f"Initialized DCA stages for {symbol}: {count}")
 
     def _seed_dca_window_from_history(self) -> None:
         """
