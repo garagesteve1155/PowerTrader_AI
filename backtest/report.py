@@ -99,19 +99,45 @@ def write_summary_text(run_id: str) -> None:
 
     if task_done:
         lines.append("Successful coins:")
-        lines.append("  COIN   trained skipped failed epochs   fills    snapshots   return%   elapsed_s")
+        lines.append(
+            "  COIN   |  schedule range          |  "
+            "epochs: total / replayed_total / replayed_this_run / trained_this_run /"
+            " skipped_this_run / failed_this_run  |  "
+            "fills_total  snapshots_total  return_total%  wall_seconds_replay  resumed_from   replayed_through"
+        )
         for e in sorted(task_done, key=lambda r: r.get("coin", "")):
             lines.append(
-                f"  {e.get('coin','?'):<5}  "
-                f"{e.get('n_trained',0):>5}   "
-                f"{e.get('n_skipped',0):>5}   "
-                f"{e.get('n_failed',0):>4}  "
-                f"{e.get('epochs_used',0):>5}  "
-                f"{e.get('fills',0):>6}    "
-                f"{e.get('snapshots',0):>8}   "
-                f"{e.get('pct_return',0.0):+7.2f}   "
-                f"{e.get('elapsed_s',0.0):>9.1f}"
+                f"  {e.get('coin','?'):<5}  |  "
+                f"{str(e.get('schedule_first_epoch','?')):>10} → "
+                f"{str(e.get('schedule_last_epoch','?')):>10}  |  "
+                f"{e.get('epochs_total',0):>4} / "
+                f"{e.get('epochs_replayed_total',0):>4} / "
+                f"{e.get('epochs_replayed_this_run',0):>4} / "
+                f"{e.get('epochs_trained_this_run',0):>4} / "
+                f"{e.get('epochs_skipped_already_done',0):>4} / "
+                f"{e.get('epochs_failed_this_run',0):>4}  |  "
+                f"{e.get('fills_total',0):>6}      "
+                f"{e.get('snapshots_total',0):>8}     "
+                f"{e.get('pct_return_total',0.0):+7.2f}   "
+                f"{e.get('wall_seconds_replay',0.0):>9.1f}    "
+                f"{str(e.get('resumed_from') or '-'):<10}  "
+                f"{str(e.get('replayed_through') or '-'):<10}"
             )
+        lines.append("")
+        lines.append("Field meanings:")
+        lines.append("  schedule range          = first → last 14-day asof in this coin's schedule (full lifetime)")
+        lines.append("  epochs_total            = number of 14-day epochs in the schedule")
+        lines.append("  epochs_replayed_total   = lifetime epochs the engine has walked (this run + prior resumes)")
+        lines.append("  epochs_replayed_this_run= NEW epochs the engine walked in *this* invocation")
+        lines.append("  epochs_trained_this_run = epochs the trainer trained from scratch in *this* invocation")
+        lines.append("  epochs_skipped_already_done = epochs whose training_data.json was reused")
+        lines.append("  epochs_failed_this_run  = epochs that crashed during training in *this* invocation")
+        lines.append("  fills_total             = lifetime fill count (cumulative)")
+        lines.append("  snapshots_total         = lifetime hourly snapshot count (cumulative)")
+        lines.append("  return_total%           = total %-return from $1000 starting capital across full backtest")
+        lines.append("  wall_seconds_replay     = wall-clock spent inside run_coin in *this* invocation")
+        lines.append("  resumed_from            = checkpoint's last_completed_epoch_ts (or '-' if fresh start)")
+        lines.append("  replayed_through        = date of the most recent bar processed (= end of run)")
         lines.append("")
 
     if task_err:

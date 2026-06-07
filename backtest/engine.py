@@ -69,9 +69,17 @@ class CoinRunConfig:
 class CoinRunResult:
     coin: str
     fills: pd.DataFrame
-    series: pd.DataFrame      # per-snapshot rows
-    epochs_used: int
+    series: pd.DataFrame             # per-snapshot rows
+    epochs_used: int                 # NEW epochs replayed in this call
     error: Optional[str] = None
+    # Lifetime counts — combine this call + prior checkpointed work
+    epochs_resumed: int = 0          # epochs already done before this call (from checkpoint)
+    epochs_total: int = 0            # total epochs in the coin's full schedule
+    # Date ranges (pre-strftime ISO dates as strings, so JSON-safe)
+    schedule_first_epoch: Optional[str] = None
+    schedule_last_epoch: Optional[str] = None
+    replayed_through: Optional[str] = None    # last epoch whose bars were walked
+    resumed_from: Optional[str] = None        # epoch the checkpoint last completed
 
 
 # ----------------------------------------------------------------------
@@ -401,6 +409,39 @@ def run_coin(
     if not series_df.empty:
         series_df.to_parquet(series_dir / f"{coin}.parquet")
 
+    # Lifetime accounting: epochs_resumed = how many were past on disk
+    # before this call started; epochs_total = whole schedule length.
+    epochs_resumed = sum(
+        1 for ep in epoch_schedule if ep.timestamp() <= resume_skip_until_ts
+    )
+    schedule_first = (
+        epoch_schedule[0].strftime("%Y-%m-%d") if len(epoch_schedule) else None
+    )
+    schedule_last = (
+        epoch_schedule[-1].strftime("%Y-%m-%d") if len(epoch_schedule) else None
+    )
+    resumed_from = (
+        pd.Timestamp(resume_skip_until_ts, unit="s", tz="UTC").strftime("%Y-%m-%d")
+        if resume_skip_until_ts else None
+    )
+    # last bar processed lives in series[-1] if any new snapshots; else
+    # fall back to the checkpoint's last_completed_epoch_ts.
+    if series:
+        last_ts = series[-1]["ts"]
+        if hasattr(last_ts, "strftime"):
+            replayed_through = last_ts.strftime("%Y-%m-%d")
+        else:
+            replayed_through = str(last_ts)[:10]
+    else:
+        replayed_through = resumed_from
+
     return CoinRunResult(
-        coin=coin, fills=fills_df, series=series_df, epochs_used=epochs_used,
+        coin=coin, fills=fills_df, series=series_df,
+        epochs_used=epochs_used,
+        epochs_resumed=epochs_resumed,
+        epochs_total=len(epoch_schedule),
+        schedule_first_epoch=schedule_first,
+        schedule_last_epoch=schedule_last,
+        replayed_through=replayed_through,
+        resumed_from=resumed_from,
     )

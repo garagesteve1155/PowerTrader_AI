@@ -219,12 +219,43 @@ second terminal.
 Event types in report.jsonl
   run_started     subcommand, coins, params, run_id
   task_started    coin, pid                     (workers emit via stdout)
-  task_completed  coin, elapsed_s, n_trained/skipped/failed, epochs_used,
-                  fills, snapshots, pct_return
+  task_completed  coin + every descriptive field listed below
   coin_started    (sweep) coin, index, total
   coin_completed  (sweep) coin, elapsed_s, n_param_points, n_ok, n_error
-  task_error      coin, error, elapsed_s
+  task_error      coin, error
   run_completed   elapsed_s, n_ok, n_error
+
+task_completed field reference
+  schedule_first_epoch       first 14-day asof in the coin's schedule
+                             (its earliest viable training date)
+  schedule_last_epoch        most recent asof — i.e. now-aligned 14-day grid
+  epochs_total               total number of 14-day epochs in the schedule
+  epochs_replayed_total      lifetime epochs the engine has walked through
+                             (this invocation + every prior resumed one)
+  epochs_replayed_this_run   NEW epochs the engine walked in *this* call
+  epochs_resumed             epochs already on disk from prior runs (these
+                             contributed to epochs_replayed_total but were
+                             not redone here)
+  epochs_trained_this_run    epochs the trainer trained from scratch in
+                             *this* call
+  epochs_skipped_already_done epochs whose training_data.json was reused
+  epochs_failed_this_run     epochs that crashed during training in this call
+  fills_total                lifetime fill count across the coin's history
+  snapshots_total            lifetime hourly snapshot count
+  pct_return_total           total %-return from $1000 starting capital
+                             across the full backtest (positive = profit)
+  wall_seconds_replay        wall-clock time spent inside run_coin in this
+                             call (not including the training phase)
+  resumed_from               date of the checkpoint's last completed epoch,
+                             or null if this was a fresh start
+  replayed_through           date of the most recent bar processed (i.e.
+                             where the run ended for this coin)
+  error                      only on task_error: "ExceptionType: msg"
+
+A nearly-no-op resume (everything already done) looks like:
+  epochs_total = N, epochs_replayed_total = N, epochs_replayed_this_run = 0,
+  epochs_trained_this_run = 0, epochs_skipped_already_done = N,
+  resumed_from = replayed_through = last bar's date
 
 Tail the raw JSONL stream:
   tail -f backtest/runs/<run_id>/report.jsonl
@@ -406,19 +437,13 @@ def cmd_pilot(args):
             results.append(r)
             if r.get("error"):
                 rpt.event(run_id, "task_error",
-                          coin=r["coin"], error=r["error"],
-                          elapsed_s=r.get("elapsed_s"))
+                          coin=r["coin"], error=r["error"])
             else:
-                rpt.event(run_id, "task_completed",
-                          coin=r["coin"],
-                          elapsed_s=r.get("engine_elapsed_s", 0.0),
-                          n_trained=r.get("n_trained", 0),
-                          n_skipped=r.get("n_skipped", 0),
-                          n_failed=r.get("n_failed", 0),
-                          epochs_used=r.get("epochs_used", 0),
-                          fills=r.get("fills", 0),
-                          snapshots=r.get("snapshots", 0),
-                          pct_return=r.get("pct_return", 0.0))
+                # Forward every descriptive field from _pilot_worker.
+                # Keeping a single forwarding loop avoids missing fields
+                # when new ones are added in the worker.
+                event_payload = {k: v for k, v in r.items() if k != "error"}
+                rpt.event(run_id, "task_completed", **event_payload)
 
     n_ok = sum(1 for r in results if not r.get("error"))
     n_err = len(results) - n_ok
@@ -432,10 +457,15 @@ def cmd_pilot(args):
         if r.get("error"):
             print(f"  {r['coin']:<5}  ERROR: {r['error']}")
         else:
-            print(f"  {r['coin']:<5}  trained={r['n_trained']} skipped={r['n_skipped']} "
-                  f"failed={r['n_failed']}  epochs_used={r['epochs_used']} "
-                  f"fills={r['fills']}  snapshots={r['snapshots']}  "
-                  f"return={r['pct_return']:+.2f}%")
+            print(
+                f"  {r['coin']:<5}  "
+                f"epochs total={r['epochs_total']:>3}  "
+                f"replayed total={r['epochs_replayed_total']:>3}  "
+                f"this-run replay={r['epochs_replayed_this_run']:>3}  "
+                f"trained={r['epochs_trained_this_run']:>3}  "
+                f"fills={r['fills_total']:>4}  "
+                f"return={r['pct_return_total']:+.2f}%"
+            )
     print(f"\nreport: backtest/runs/{run_id}/report.txt")
 
 
@@ -498,11 +528,16 @@ def _pilot_worker(coin: str, cfg: dict) -> dict:
                 n_skip += 1
             elif not r.ok:
                 n_fail += 1
-        out["n_skipped"] = n_skip
-        out["n_failed"] = n_fail
-        out["n_trained"] = len(sched) - n_skip - n_fail
+        # Descriptive event-payload fields.
+        out["epochs_trained_this_run"] = len(sched) - n_skip - n_fail
+        out["epochs_skipped_already_done"] = n_skip
+        out["epochs_failed_this_run"] = n_fail
+        out["epochs_total"] = len(sched)
+        out["schedule_first_epoch"] = sched[0].strftime("%Y-%m-%d")
+        out["schedule_last_epoch"] = sched[-1].strftime("%Y-%m-%d")
         _log(f"training phase done in {_time.monotonic()-train_t0:.1f}s "
-             f"(trained={out['n_trained']} skipped={n_skip} failed={n_fail})")
+             f"(trained={out['epochs_trained_this_run']} "
+             f"skipped={n_skip} failed={n_fail})")
 
         until = (
             min(sched[-1] + _pd.Timedelta(days=14), now_utc)
@@ -522,19 +557,24 @@ def _pilot_worker(coin: str, cfg: dict) -> dict:
         _log(f"replay phase begin: {len(sched)} epoch(s)")
         engine_t0 = _time.monotonic()
         res = _run_coin(cfg["run_id"], rc, epoch_schedule=sched, price_source=src)
-        out["engine_elapsed_s"] = _time.monotonic() - engine_t0
-        out["epochs_used"] = res.epochs_used
-        out["fills"] = len(res.fills)
-        out["snapshots"] = len(res.series)
+        out["wall_seconds_replay"] = _time.monotonic() - engine_t0
+        out["epochs_replayed_this_run"] = res.epochs_used
+        out["epochs_replayed_total"] = res.epochs_used + res.epochs_resumed
+        out["epochs_resumed"] = res.epochs_resumed
+        out["fills_total"] = len(res.fills)
+        out["snapshots_total"] = len(res.series)
+        out["replayed_through"] = res.replayed_through
+        out["resumed_from"] = res.resumed_from
         if res.series is not None and len(res.series):
             first = float(res.series.iloc[0]["total_account_value"])
             last = float(res.series.iloc[-1]["total_account_value"])
-            out["pct_return"] = (last / first - 1.0) * 100.0 if first else 0.0
+            out["pct_return_total"] = (last / first - 1.0) * 100.0 if first else 0.0
         else:
-            out["pct_return"] = 0.0
-        _log(f"EXIT ok  replay_elapsed={out['engine_elapsed_s']:.1f}s  "
-             f"epochs_used={out['epochs_used']}  fills={out['fills']}  "
-             f"return={out['pct_return']:+.2f}%")
+            out["pct_return_total"] = 0.0
+        _log(f"EXIT ok  replay_elapsed={out['wall_seconds_replay']:.1f}s  "
+             f"epochs_replayed_this_run={out['epochs_replayed_this_run']}  "
+             f"fills_total={out['fills_total']}  "
+             f"return={out['pct_return_total']:+.2f}%")
         return out
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {e}"
