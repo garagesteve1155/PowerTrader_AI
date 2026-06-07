@@ -216,9 +216,84 @@ def run_coin(
     # care about.
     _STUCK_THRESHOLD_S = 120.0
 
-    # Shared mutable progress marker. Index 0 is the wall-clock of the
-    # last bar update; 1 is current epoch index; 2 is bar within epoch.
-    _progress = [_time.monotonic(), 0, 0]
+    # Shared mutable progress marker for the watchdog thread:
+    #   [0] last_progress_monotonic
+    #   [1] current epoch index (1-based)
+    #   [2] current bar within epoch (1-based)
+    #   [3] current bar timestamp (str)
+    #   [4] current bar live_price (5min open)
+    #   [5] current bar fill_price (5min close)
+    _progress = [_time.monotonic(), 0, 0, None, None, None]
+
+    stuck_dir = ws.ensure_dir(ws.run_dir(run_id) / "stuck")
+
+    def _capture_stuck_snapshot(ei_now: int, bar_now: int, gap_s: float) -> dict:
+        """Best-effort forensic dump of every mutable state object the
+        bar loop touches. Every field is independently guarded so a
+        partial-state read (mid-mutation from the main thread) doesn't
+        crash the watchdog — we record whatever sticks."""
+        import copy as _copy
+        snap: dict = {
+            "ts_captured": pd.Timestamp.now(tz="UTC").isoformat(),
+            "coin": coin,
+            "run_id": run_id,
+            "epoch_idx": ei_now,
+            "epoch_total": len(epoch_schedule),
+            "bar_in_epoch": bar_now,
+            "no_progress_seconds": gap_s,
+            "stuck_threshold_seconds": _STUCK_THRESHOLD_S,
+            "bar_ts": _progress[3],
+            "live_price": _progress[4],
+            "fill_price": _progress[5],
+            "epochs_used_so_far": epochs_used,
+            "fills_so_far": len(fills),
+            "series_so_far": len(series),
+        }
+        try:
+            snap["epoch_start"] = (
+                epoch_schedule[ei_now - 1].strftime("%Y-%m-%d")
+                if 0 < ei_now <= len(epoch_schedule) else None
+            )
+        except Exception as e:
+            snap["epoch_start_error"] = repr(e)
+        # Exchange
+        try:
+            snap["exchange"] = {
+                "cash": float(ex._cash),
+                "holdings": dict(ex._holdings),
+                "orders_log_size": len(ex._orders_log),
+                "last_order": ex._orders_log[-1] if ex._orders_log else None,
+            }
+        except Exception as e:
+            snap["exchange_error"] = repr(e)
+        # Trader
+        try:
+            snap["trader"] = {
+                "pnl_ledger": _copy.deepcopy(trader._pnl_ledger),
+                "cost_basis": dict(trader.cost_basis),
+                "trailing_pm": _copy.deepcopy(trader.trailing_pm),
+                "dca_levels_triggered": _copy.deepcopy(trader.dca_levels_triggered),
+                "dca_buy_ts": _copy.deepcopy(trader._dca_buy_ts),
+                "dca_last_sell_ts": dict(trader._dca_last_sell_ts),
+                "signal_state": _copy.deepcopy(trader._signal_state),
+                "trailing_gap_pct": trader.trailing_gap_pct,
+                "pm_start_pct_no_dca": trader.pm_start_pct_no_dca,
+                "pm_start_pct_with_dca": trader.pm_start_pct_with_dca,
+            }
+        except Exception as e:
+            snap["trader_error"] = repr(e)
+        # Thinker
+        try:
+            snap["thinker"] = {
+                "high_tf_prices": list(state.high_tf_prices),
+                "low_tf_prices": list(state.low_tf_prices),
+                "high_bound_prices": list(state.high_bound_prices),
+                "low_bound_prices": list(state.low_bound_prices),
+                "perfects": list(state.perfects),
+            }
+        except Exception as e:
+            snap["thinker_error"] = repr(e)
+        return snap
 
     import threading as _threading
     _watchdog_stop = _threading.Event()
@@ -231,10 +306,29 @@ def run_coin(
             gap = _time.monotonic() - last_progress
             if gap > _STUCK_THRESHOLD_S and ei_now != already_fired_for:
                 already_fired_for = ei_now
+                # Dump forensic snapshot before printing the WARN so the
+                # log line can include the dump path.
+                snap_path = None
+                try:
+                    snap = _capture_stuck_snapshot(ei_now, bar_now, gap)
+                    stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%d_%H%M%S")
+                    snap_path = stuck_dir / (
+                        f"{coin}_{stamp}_epoch{ei_now}_bar{bar_now}.json"
+                    )
+                    with open(snap_path, "w") as f:
+                        json.dump(snap, f, default=str, indent=2)
+                except Exception as snap_err:
+                    print(
+                        f"{_engine_tag} WATCHDOG: snapshot capture failed: "
+                        f"{type(snap_err).__name__}: {snap_err}",
+                        flush=True,
+                    )
                 print(
                     f"{_engine_tag} WATCHDOG: no bar progress for {gap:.0f}s — "
                     f"stuck at epoch {ei_now}/{len(epoch_schedule)} "
-                    f"bar {bar_now}. py-spy or gdb this pid to inspect.",
+                    f"bar {bar_now}"
+                    + (f". snapshot: {snap_path}" if snap_path else "")
+                    + ". py-spy or gdb this pid to inspect.",
                     flush=True,
                 )
     _threading.Thread(target=_watchdog_thread, daemon=True).start()
@@ -277,10 +371,14 @@ def run_coin(
         for bar_ts_pd, row in bars.iterrows():
             _bar_idx_in_epoch += 1
             # Refresh progress marker so the watchdog thread can detect
-            # a stuck bar-walk independent of the heartbeat cadence.
+            # a stuck bar-walk independent of the heartbeat cadence and
+            # capture the wedged bar's data on snapshot.
             _progress[0] = _time.monotonic()
             _progress[1] = ei + 1
             _progress[2] = _bar_idx_in_epoch
+            _progress[3] = str(bar_ts_pd)
+            _progress[4] = float(row["open"])
+            _progress[5] = float(row["close"])
             if _bar_idx_in_epoch % _BAR_HEARTBEAT_EVERY == 0:
                 _hb_elapsed = _time.monotonic() - _epoch_t0
                 print(f"{_engine_tag} epoch {ei + 1}/{len(epoch_schedule)} "
