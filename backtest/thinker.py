@@ -151,13 +151,23 @@ def compute_tf_prices(
     Mirrors pt_thinker:773-799: if a timeframe is "inactive" both prices
     collapse to the close (so the bound margin will be a flat ±0.5% band
     around it; the rebuild treats inactive TFs as fixed placeholders).
+
+    Clamp: the weighted-memory aggregate can occasionally produce
+    `low_diff < -1` (or `high_diff < -1`), giving a non-positive predicted
+    price. A negative bound has no economic meaning AND it triggers an
+    infinite loop in rebuild_bounds (the gap-walk nudges by *multiplying*
+    by 0.9995, which moves negatives toward zero — the wrong direction
+    for the sort ordering, so the inversion check fires forever). When
+    that happens, treat the prediction as a no-op for the bar by
+    collapsing both prices to close_price, matching the inactive path.
     """
     if perfect_status == "inactive":
         return close_price, close_price
-    return (
-        close_price + close_price * high_diff,
-        close_price + close_price * low_diff,
-    )
+    ht = close_price + close_price * high_diff
+    lt = close_price + close_price * low_diff
+    if ht <= 0 or lt <= 0:
+        return close_price, close_price
+    return ht, lt
 
 
 def rebuild_bounds(
