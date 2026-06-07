@@ -79,41 +79,77 @@ aggregate
     in a run. Run after pilot/run/sweep to populate the agg/ subdir that
     backtest/research.py reads.
 
-Common options
---------------
---coin <symbol>
-    Single coin (e.g. ETH).
---coin <a,b,c>
-    Comma-separated list (e.g. BTC,ETH,SOL).
---coin (omitted on train/pilot/run)
-    Default to every coin in pt_config.json. Each coin gets its own
-    $1000 starting capital and its own subtree under runs/<run_id>/.
-    Multi-coin runs are serial (pilot/run); train fans out across the
-    whole coin × epoch grid via Ray.
+Options
+-------
+Which options each subcommand accepts:
+
+  Option            train  pilot  run    sweep  aggregate
+  ----------------  -----  -----  -----  -----  ---------
+  --coin            opt    opt    opt    REQ    --coins (plural, REQ)
+  --epochs          yes    yes    --     --     --
+  --lvl             --     yes    yes    --     --
+  --alloc           --     yes    yes    --     --
+  --pm              --     yes    yes    --     --
+  --starting-usd    --     yes    yes    --     --
+  --run-id          yes    yes    yes    --     --
+  --serial          yes    yes    yes    yes    --
+  run_id (positional)                            REQ
+
+Legend: opt = optional, REQ = required, yes = accepted, -- = not accepted.
+
+Note: `aggregate` takes the run_id as a *positional* argument (not
+--run-id) and uses `--coins` (plural) for the coin list; every other
+subcommand uses `--coin` (singular) accepting a single symbol or
+comma-separated list.  `sweep` requires --coin because the sweep is
+per-coin (the 350-point grid is over params, not over coins).
+
+Per-option semantics
+~~~~~~~~~~~~~~~~~~~~
+
+--coin <symbol> | <a,b,c> | omitted
+    Single coin (e.g. ETH), comma-separated list (e.g. BTC,ETH,SOL),
+    or omitted to default to every coin in pt_config.json. Each coin
+    gets its own $1000 starting capital and its own subtree under
+    runs/<run_id>/. train fans the coin × epoch grid across Ray; pilot
+    and run fan out one Ray task per coin (replay within a coin is
+    path-dependent and stays sequential across epochs).
 
 --run-id <existing>
     Resume / reuse an existing run. The trainer skips epochs whose
     training_data.json is already on disk; the engine skips epochs with
-    no training_data.json. So passing the same --run-id picks up exactly
-    where the previous invocation stopped, or composes Phase A + Phase B.
+    no training_data.json and resumes from the per-coin checkpoint
+    pickle for replay state. Passing the same --run-id thus picks up
+    exactly where the previous invocation stopped, or composes
+    Phase A + Phase B.
 
 --epochs N
     Cap the schedule to the first N 14-day epochs per coin.
-    train: caps the training grid.
+    train: caps the training grid (default: all viable).
     pilot: caps both training and replay (default 2).
-    Omit on `run` to do all viable epochs per coin.
+    Not accepted on `run` — `run` always does the full viable schedule;
+    use `pilot --epochs N` for a bounded smoke run.
 
 --lvl, --alloc, --pm
-    Inline sweep parameters for pilot/run only. Defaults match the prod
+    Inline sweep parameters for pilot/run. Defaults match the prod
     pt_config.json values (lvl=2, alloc=1%, pm=4%).
+    train doesn't take these because training is param-independent.
+    sweep doesn't take them because the whole point of sweep is to
+    vary them across the default 3D grid.
 
 --starting-usd N
-    Starting cash per coin. Default 1000.
+    Starting cash per coin (pilot/run only). Default 1000.
 
 --serial
-    train and sweep accept this flag. Disables Ray; runs every task
-    sequentially. Useful when Ray isn't installed, when debugging a
-    single task, or for deterministic timing.
+    Disable Ray; run every fan-out task sequentially. Useful when Ray
+    isn't installed, when debugging a single task, or for deterministic
+    timing. Accepted on train, pilot, run, sweep.
+
+Positional / aggregate-only
+    `aggregate <run_id> --coins X,Y,Z` reads the per-coin series/fills
+    parquets that previous pilot/run/sweep invocations wrote, and
+    produces the hourly + daily portfolio aggregates the Marimo notebook
+    reads. --coins is required and accepts a comma-separated list only
+    (no default-to-all).
 
 Examples
 --------
