@@ -85,7 +85,7 @@ Which options each subcommand accepts:
 
   Option            train  pilot  run    sweep  aggregate
   ----------------  -----  -----  -----  -----  ---------
-  --coin            opt    opt    opt    REQ    --coins (plural, REQ)
+  --coin            opt    opt    opt    opt    --coins (plural, REQ)
   --epochs          yes    yes    --     --     --
   --lvl             --     yes    yes    --     --
   --alloc           --     yes    yes    --     --
@@ -99,9 +99,8 @@ Legend: opt = optional, REQ = required, yes = accepted, -- = not accepted.
 
 Note: `aggregate` takes the run_id as a *positional* argument (not
 --run-id) and uses `--coins` (plural) for the coin list; every other
-subcommand uses `--coin` (singular) accepting a single symbol or
-comma-separated list.  `sweep` requires --coin because the sweep is
-per-coin (the 350-point grid is over params, not over coins).
+subcommand uses `--coin` (singular) accepting a single symbol, a
+comma-separated list, or omitted (meaning every coin in pt_config.json).
 
 Per-option semantics
 ~~~~~~~~~~~~~~~~~~~~
@@ -570,26 +569,50 @@ def cmd_train(args):
 
 
 def cmd_sweep(args):
-    coin = args.coin.upper()
-    run_id = ws.new_run_id(prefix=f"sweep_{coin}")
+    coins = _resolve_coins(args.coin)
+    if not coins:
+        print("no coins to sweep")
+        return
+
+    # Run-id naming: include coin if just one, otherwise generic
+    if len(coins) == 1:
+        run_id = ws.new_run_id(prefix=f"sweep_{coins[0]}")
+    else:
+        run_id = ws.new_run_id(prefix="sweep")
     print(f"sweep run_id = {run_id}")
+
     until = pd.Timestamp.utcnow()
     if until.tz is None:
         until = until.tz_localize("UTC")
     grid = default_grid()
-    print(f"grid size: {len(grid)} param points × coin '{coin}'  ({'parallel' if not args.serial else 'serial'})")
+    total_tasks = len(grid) * len(coins)
+    print(f"grid size: {len(grid)} param points × {len(coins)} coin(s) = "
+          f"{total_tasks} backtests  "
+          f"({'parallel' if not args.serial else 'serial'})")
+    print(f"coins: {', '.join(coins)}")
 
-    results = run_coin_sweep(
-        run_id, coin, until=until, grid=grid, parallel=not args.serial,
-    )
-    print(f"completed {len(results)} tasks")
-    errors = [r for r in results if r.error]
+    # Each coin's sweep is internally Ray-parallel across its 350 param
+    # points. Per-coin training (param-independent) happens once before
+    # that coin's fan-out. Multiple coins are dispatched sequentially —
+    # one coin's Ray cluster cycle at a time — to keep memory pressure
+    # bounded.
+    all_results = []
+    for ci, coin in enumerate(coins, 1):
+        print(f"\n── sweep [{ci}/{len(coins)}] {coin} ──")
+        rs = run_coin_sweep(
+            run_id, coin, until=until, grid=grid, parallel=not args.serial,
+        )
+        all_results.extend(rs)
+
+    print(f"\ncompleted {len(all_results)} tasks across {len(coins)} coin(s)")
+    errors = [r for r in all_results if r.error]
+    ok = [r for r in all_results if not r.error]
     if errors:
         print(f"errors: {len(errors)}")
         for e in errors[:5]:
             print(f"  {e.coin} {e.params}: {e.error}")
-    ok = [r for r in results if not r.error]
-    print(f"ok: {len(ok)}; avg fills/run: {sum(r.rows_fills for r in ok)/max(len(ok),1):.1f}")
+    print(f"ok: {len(ok)}; avg fills/run: "
+          f"{sum(r.rows_fills for r in ok)/max(len(ok),1):.1f}")
 
 
 def cmd_aggregate(args):
@@ -651,7 +674,9 @@ def main():
     train.set_defaults(func=cmd_train)
 
     sweep = sub.add_parser("sweep", help="3D parameter sweep on one coin")
-    sweep.add_argument("--coin", required=True)
+    sweep.add_argument("--coin", default=None,
+                       help="Coin symbol, comma-separated list, "
+                            "or omit for all pt_config.json coins")
     sweep.add_argument("--serial", action="store_true",
                        help="Disable Ray; run param points serially")
     sweep.set_defaults(func=cmd_sweep)
