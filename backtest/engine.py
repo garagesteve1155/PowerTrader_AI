@@ -368,6 +368,7 @@ def run_coin(
         epochs_used += 1
         _bars_in_epoch = len(bars)
         _bar_idx_in_epoch = 0
+        _SLOW_BAR_LOG_S = 5.0
         for bar_ts_pd, row in bars.iterrows():
             _bar_idx_in_epoch += 1
             # Refresh progress marker so the watchdog thread can detect
@@ -379,6 +380,8 @@ def run_coin(
             _progress[3] = str(bar_ts_pd)
             _progress[4] = float(row["open"])
             _progress[5] = float(row["close"])
+            _bar_t0 = _time.monotonic()
+            _t_score = _t_vote = _t_rebuild = _t_signal = _t_manage = _t_capture = 0.0
             if _bar_idx_in_epoch % _BAR_HEARTBEAT_EVERY == 0:
                 _hb_elapsed = _time.monotonic() - _epoch_t0
                 print(f"{_engine_tag} epoch {ei + 1}/{len(epoch_schedule)} "
@@ -397,6 +400,7 @@ def run_coin(
                 new_low_tf = [0.0] * len(TF_NAMES)
                 new_perfects = ["inactive"] * len(TF_NAMES)
 
+            _ts0 = _time.monotonic()
             for tf_idx, (tf_name, tf_min) in enumerate(zip(TF_NAMES, TF_MINUTES)):
                 tf_df = tf_frames[tf_min]
                 if tf_df.empty:
@@ -419,7 +423,10 @@ def run_coin(
                 new_low_tf[tf_idx] = lt
                 new_perfects[tf_idx] = status
 
+            _t_score = _time.monotonic() - _ts0
+
             # Use PREVIOUS bounds for voting, then rebuild for next bar
+            _ts0 = _time.monotonic()
             long_count = 0
             short_count = 0
             for i in range(len(TF_NAMES)):
@@ -430,8 +437,10 @@ def run_coin(
                     long_count += 1
                 elif vote == "short":
                     short_count += 1
+            _t_vote = _time.monotonic() - _ts0
 
             # Rebuild bounds from the just-scored TF prices for the NEXT bar
+            _ts0 = _time.monotonic()
             high_bounds, low_bounds = bt_thinker.rebuild_bounds(
                 new_high_tf, new_low_tf, new_perfects,
             )
@@ -442,21 +451,29 @@ def run_coin(
             if len(low_bounds) < n_tfs:
                 low_bounds = list(low_bounds) + [0.0] * (n_tfs - len(low_bounds))
 
+            _t_rebuild = _time.monotonic() - _ts0
+
             # Long price levels for the trader (dedup + sort desc, like prod _read_long_price_levels)
             uniq = {round(v, 12): v for v in low_bounds if v is not None}
             long_levels = sorted(uniq.values(), reverse=True)
 
             # ── Drive the trader ──────────────────────────────────────
+            _ts0 = _time.monotonic()
             trader.set_signals(coin, long_count, short_count, long_levels)
             ex.set_bar(coin, live_price, fill_price)
             ex.set_time(T)
             trader.set_now(T)
+            _t_signal = _time.monotonic() - _ts0
+            _ts0 = _time.monotonic()
             trader.manage_trades()
+            _t_manage = _time.monotonic() - _ts0
 
             # ── Capture new fills (delta from prior log) ──────────────
+            _ts0 = _time.monotonic()
             new_orders = ex.orders_log()[len(fills):]
             for o in new_orders:
                 fills.append(o)
+            _t_capture = _time.monotonic() - _ts0
 
             # ── Snapshot state ────────────────────────────────────────
             step_count += 1
@@ -485,6 +502,20 @@ def run_coin(
             state.perfects = new_perfects
             state.high_bound_prices = high_bounds
             state.low_bound_prices = low_bounds
+
+            # Slow-bar breakdown — silent on fast bars, loud when one
+            # bar takes >5s. Tells us which component is the bottleneck.
+            _bar_dur = _time.monotonic() - _bar_t0
+            if _bar_dur > _SLOW_BAR_LOG_S:
+                print(
+                    f"{_engine_tag} SLOW_BAR epoch {ei + 1} bar "
+                    f"{_bar_idx_in_epoch}/{_bars_in_epoch} {bar_ts_pd} "
+                    f"total={_bar_dur:.1f}s  "
+                    f"score={_t_score:.2f}s  vote={_t_vote:.3f}s  "
+                    f"rebuild={_t_rebuild:.3f}s  signal={_t_signal:.3f}s  "
+                    f"manage_trades={_t_manage:.2f}s  capture={_t_capture:.3f}s",
+                    flush=True,
+                )
 
         # ── End of epoch — flush checkpoint + parquets ────────────────
         # Trader/exchange/thinker state are snapshotted before moving on,
