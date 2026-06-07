@@ -209,10 +209,35 @@ def run_coin(
     # bar-walk can be pinpointed without waiting for the per-epoch
     # boundary log (which only fires once an epoch fully completes).
     _BAR_HEARTBEAT_EVERY = 500
-    # Wall-clock watchdog: emit a single WARN line if any epoch takes
-    # longer than this. Doesn't kill the worker — just shouts. Expected
-    # per-epoch time is ~7s, so 5min is ~40x the upper end of normal.
-    _EPOCH_WATCHDOG_S = 300.0
+    # Wall-clock watchdog: emit a WARN line if no bar-loop progress is
+    # observed for this many seconds. Runs on a daemon THREAD (not in
+    # the bar loop) so it fires even if the worker is hung inside a
+    # single manage_trades call — which is exactly the failure mode we
+    # care about.
+    _STUCK_THRESHOLD_S = 120.0
+
+    # Shared mutable progress marker. Index 0 is the wall-clock of the
+    # last bar update; 1 is current epoch index; 2 is bar within epoch.
+    _progress = [_time.monotonic(), 0, 0]
+
+    import threading as _threading
+    _watchdog_stop = _threading.Event()
+    def _watchdog_thread():
+        already_fired_for = -1  # epoch index of last warning emitted
+        while not _watchdog_stop.wait(15.0):
+            last_progress, ei_now, bar_now = (
+                _progress[0], _progress[1], _progress[2]
+            )
+            gap = _time.monotonic() - last_progress
+            if gap > _STUCK_THRESHOLD_S and ei_now != already_fired_for:
+                already_fired_for = ei_now
+                print(
+                    f"{_engine_tag} WATCHDOG: no bar progress for {gap:.0f}s — "
+                    f"stuck at epoch {ei_now}/{len(epoch_schedule)} "
+                    f"bar {bar_now}. py-spy or gdb this pid to inspect.",
+                    flush=True,
+                )
+    _threading.Thread(target=_watchdog_thread, daemon=True).start()
     for ei, epoch_start in enumerate(epoch_schedule):
         # Load training_data for THIS epoch
         epoch_ts = epoch_start.timestamp()
@@ -249,20 +274,18 @@ def run_coin(
         epochs_used += 1
         _bars_in_epoch = len(bars)
         _bar_idx_in_epoch = 0
-        _watchdog_fired = False
         for bar_ts_pd, row in bars.iterrows():
             _bar_idx_in_epoch += 1
+            # Refresh progress marker so the watchdog thread can detect
+            # a stuck bar-walk independent of the heartbeat cadence.
+            _progress[0] = _time.monotonic()
+            _progress[1] = ei + 1
+            _progress[2] = _bar_idx_in_epoch
             if _bar_idx_in_epoch % _BAR_HEARTBEAT_EVERY == 0:
                 _hb_elapsed = _time.monotonic() - _epoch_t0
                 print(f"{_engine_tag} epoch {ei + 1}/{len(epoch_schedule)} "
                       f"{epoch_start.date()} bar {_bar_idx_in_epoch}/{_bars_in_epoch} "
                       f"elapsed={_hb_elapsed:.1f}s", flush=True)
-                if (not _watchdog_fired) and _hb_elapsed > _EPOCH_WATCHDOG_S:
-                    _watchdog_fired = True
-                    print(f"{_engine_tag} WATCHDOG: epoch {ei + 1} has been "
-                          f"running {_hb_elapsed:.0f}s on bar "
-                          f"{_bar_idx_in_epoch}/{_bars_in_epoch} — possibly stuck",
-                          flush=True)
             T = float(bar_ts_pd.timestamp())
             live_price = float(row["open"])
             fill_price = float(row["close"])
@@ -401,6 +424,8 @@ def run_coin(
               f"{epoch_start.date()} done in {_dt:.1f}s  "
               f"fills={len(fills)} snapshots={len(series)}", flush=True)
         _epoch_t0 = _time.monotonic()
+
+    _watchdog_stop.set()
 
     fills_df = pd.DataFrame(fills)
     series_df = pd.DataFrame(series)
