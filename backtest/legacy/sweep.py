@@ -27,9 +27,9 @@ import pandas as pd
 
 from pt_pricesource import ArcticPriceSource
 
-from . import workspace as ws
+from .. import workspace as ws
 from .engine import BacktestParams, CoinRunConfig, run_coin
-from .train import epoch_schedule, train_grid, train_one_epoch
+from ..train import epoch_schedule, train_grid, train_one_epoch
 
 
 def default_grid() -> List[BacktestParams]:

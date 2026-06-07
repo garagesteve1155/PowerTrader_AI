@@ -16,7 +16,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from . import workspace as ws
+from .. import workspace as ws
 
 
 _TS_ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"

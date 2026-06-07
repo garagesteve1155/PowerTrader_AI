@@ -25,7 +25,7 @@ import pickle
 from pathlib import Path
 from typing import Optional
 
-from . import workspace as ws
+from .. import workspace as ws
 
 
 CHECKPOINT_VERSION = 1

@@ -36,10 +36,10 @@ from pt_env import TRAIN_TF_MINUTES, TRAIN_TF_NAMES
 from pt_pricesource import ArcticPriceSource
 
 from . import checkpoint as ckpt
-from . import thinker as bt_thinker
-from . import workspace as ws
-from .exchange import BacktestExchange
-from .trader import BacktestTrader
+from .. import thinker as bt_thinker
+from .. import workspace as ws
+from ..exchange import BacktestExchange
+from ..trader import BacktestTrader
 
 
 FIVE_MIN = 300

@@ -382,10 +382,10 @@ import pandas as pd
 from pt_pricesource import ArcticPriceSource
 
 from . import workspace as ws
-from . import aggregate as agg
+from .legacy import aggregate as agg
 from . import report as rpt
-from .engine import BacktestParams, CoinRunConfig, run_coin
-from .sweep import _train_coin_phase, default_grid, run_coin_sweep
+from .legacy.engine import BacktestParams, CoinRunConfig, run_coin
+from .legacy.sweep import _train_coin_phase, default_grid, run_coin_sweep
 from .train import epoch_schedule, train_grid, train_one_epoch
 
 
@@ -515,7 +515,7 @@ def _pilot_worker(coin: str, cfg: dict) -> dict:
     import pt_trader as _pt
     from .train import epoch_schedule as _epoch_schedule
     from .train import train_one_epoch as _train_one_epoch
-    from .engine import (
+    from .legacy.engine import (
         BacktestParams as _BP, CoinRunConfig as _Cfg, run_coin as _run_coin,
     )
 
