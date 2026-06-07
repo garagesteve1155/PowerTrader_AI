@@ -196,14 +196,77 @@ runs/<run_id>/
   training/<YYYYMMDD>/<COIN>/trainer_state.json
   fills/<COIN>.parquet                             # chronological fill log
   series/<COIN>.parquet                            # per-5min state snapshots
+  checkpoint/<COIN>.pkl                            # resumable per-epoch state
   agg/<COIN>_hourly.parquet                        # hourly per-coin
   agg/portfolio_hourly.parquet                     # hourly portfolio sum
   agg/portfolio_wide_hourly.parquet                # per-coin matrix
   agg/portfolio_daily.parquet                      # daily + daily_pct_return
+  report.jsonl                                     # live event stream
+  report.txt                                       # human-readable summary
 
 Sweep sub-runs land in sibling directories named
 runs/<run_id>__<COIN>__l<L>_a<A>_p<P>/. The Marimo notebook picks them
 up automatically and renders a (lvl × alloc) heatmap averaged over pm.
+
+Monitoring a live run
+---------------------
+`run`, `pilot`, and `sweep` each write a timestamped event log to
+`runs/<run_id>/report.jsonl` as work proceeds, plus a human-readable
+`runs/<run_id>/report.txt` summary at end-of-run. Both paths are echoed
+to the CLI's stdout on startup so you can copy them straight into a
+second terminal.
+
+Event types in report.jsonl
+  run_started     subcommand, coins, params, run_id
+  task_started    coin, pid                     (workers emit via stdout)
+  task_completed  coin, elapsed_s, n_trained/skipped/failed, epochs_used,
+                  fills, snapshots, pct_return
+  coin_started    (sweep) coin, index, total
+  coin_completed  (sweep) coin, elapsed_s, n_param_points, n_ok, n_error
+  task_error      coin, error, elapsed_s
+  run_completed   elapsed_s, n_ok, n_error
+
+Tail the raw JSONL stream:
+  tail -f backtest/runs/<run_id>/report.jsonl
+
+Tail a single-line summary per event (jq-style with stdlib):
+  tail -f backtest/runs/<run_id>/report.jsonl | python3 -c "
+import sys, json
+for line in sys.stdin:
+    e = json.loads(line)
+    coin = e.get('coin', '')
+    extra = ''
+    if e['event'] == 'task_completed':
+        extra = f\"  elapsed={e['elapsed_s']:.1f}s  fills={e['fills']}  return={e['pct_return']:+.2f}%\"
+    elif e['event'] == 'task_error':
+        extra = f\"  ERROR: {e['error']}\"
+    print(f\"{e['ts']}  {e['event']:<18}  {coin:<5}{extra}\", flush=True)
+"
+
+Per-worker progress beacons (per-epoch timing inside a coin's replay)
+live in the Ray worker logs, NOT in report.jsonl. To watch the slow
+worker(s) in real time:
+
+  tail -f /tmp/ray/session_latest/logs/worker-*.out
+
+Each log line is prefixed with `[worker pid=X coin=Y]` so you can grep
+for one coin's full lifecycle:
+
+  grep "coin=BTC" /tmp/ray/session_latest/logs/worker-*.out
+
+If a worker hangs, use the `pid=` field from its last log line to find
+it in `ps aux | grep "ray::_pilot_worker"`, then check that worker's
+.out file for the last completed epoch.
+
+Aggregate progress quickly during a multi-coin run by counting
+checkpoints written (one per completed (coin, epoch) within a coin):
+
+  ls backtest/runs/<run_id>/checkpoint/ | wc -l    # number of coins done
+  ls backtest/runs/<run_id>/training/      | wc -l # number of epoch dirs
+
+Or jump to the final summary the moment the run finishes:
+
+  cat backtest/runs/<run_id>/report.txt
 
 Failure handling
 ----------------
