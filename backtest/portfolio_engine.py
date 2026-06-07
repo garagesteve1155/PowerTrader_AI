@@ -30,6 +30,7 @@ import bisect
 import datetime as _dt
 import json
 import os
+import pickle
 import threading
 import time as _time
 from dataclasses import dataclass, field
@@ -85,7 +86,57 @@ class PortfolioRunResult:
     coins_active: List[str]
     coins_skipped: List[str]
     bars_processed: int
+    bars_resumed: int = 0
     error: Optional[str] = None
+
+
+_CHECKPOINT_VERSION = 1
+
+
+def _checkpoint_path(run_id: str):
+    return ws.ensure_dir(ws.run_dir(run_id)) / "portfolio_checkpoint.pkl"
+
+
+def _save_checkpoint(
+    run_id: str,
+    last_bar_ts: float,
+    exchange_state: dict,
+    trader_state: dict,
+    thinker_states: dict,
+    cached_epoch_ts: dict,
+    fills: list,
+    series: list,
+) -> None:
+    """Atomic write of full joint-engine state."""
+    payload = {
+        "version": _CHECKPOINT_VERSION,
+        "last_completed_bar_ts": float(last_bar_ts),
+        "exchange": exchange_state,
+        "trader": trader_state,
+        "thinker_states": thinker_states,
+        "cached_epoch_ts": cached_epoch_ts,
+        "fills": fills,
+        "series": series,
+    }
+    path = _checkpoint_path(run_id)
+    tmp = path.with_suffix(".pkl.tmp")
+    with open(tmp, "wb") as f:
+        pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(tmp, path)
+
+
+def _load_checkpoint(run_id: str) -> Optional[dict]:
+    path = _checkpoint_path(run_id)
+    if not path.exists():
+        return None
+    try:
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+    except Exception:
+        return None
+    if not isinstance(data, dict) or data.get("version") != _CHECKPOINT_VERSION:
+        return None
+    return data
 
 
 # ----------------------------------------------------------------------
@@ -220,6 +271,39 @@ def run_portfolio(
     fills: List[dict] = []
     series: List[dict] = []
 
+    # Resume from checkpoint if present
+    resume_skip_until_ts: float = 0.0
+    bars_resumed = 0
+    _ckpt = _load_checkpoint(run_id)
+    if _ckpt is not None:
+        try:
+            ex.load_state(_ckpt["exchange"])
+            trader.exchange = ex
+            trader.load_state(_ckpt["trader"])
+            for c, st_dict in _ckpt["thinker_states"].items():
+                if c in thinker_state:
+                    thinker_state[c] = bt_thinker.ThinkerState(**st_dict)
+            for c, ets in _ckpt["cached_epoch_ts"].items():
+                if c in cached_epoch_ts:
+                    cached_epoch_ts[c] = ets
+            fills = list(_ckpt["fills"])
+            series = list(_ckpt["series"])
+            resume_skip_until_ts = float(_ckpt["last_completed_bar_ts"])
+            _log(f"resumed from checkpoint  last_completed="
+                 f"{_iso(pd.Timestamp(resume_skip_until_ts, unit='s', tz='UTC'))}  "
+                 f"fills={len(fills)}  snapshots={len(series)}")
+        except Exception as e:
+            _log(f"checkpoint load failed ({type(e).__name__}: {e}); fresh start")
+            ex = BacktestExchange(starting_usd=cfg.starting_usd)
+            trader = BacktestTrader(ex)
+            thinker_state = {
+                c: bt_thinker.ThinkerState.fresh(len(TF_NAMES)) for c in active
+            }
+            cached_epoch_ts = {c: None for c in active}
+            fills = []
+            series = []
+            resume_skip_until_ts = 0.0
+
     # ── Daemon watchdog ──────────────────────────────────────────────
     _progress = [_time.monotonic(), 0]  # [last_progress, bar_idx]
     _watchdog_stop = threading.Event()
@@ -237,6 +321,9 @@ def run_portfolio(
     _last_log_step = 0
     for step, T_pd in enumerate(all_idx):
         T = float(T_pd.timestamp())
+        if T <= resume_skip_until_ts:
+            bars_resumed += 1
+            continue
         _progress[0] = _time.monotonic()
         _progress[1] = step
 
@@ -367,6 +454,26 @@ def run_portfolio(
             snap["total_account_value"] = ex._cash + tot_pos_val
             series.append(snap)
 
+            # Per-snapshot checkpoint flush. Worst-case crash loses
+            # at most one snapshot interval (default = 1 day).
+            try:
+                _save_checkpoint(
+                    run_id, T,
+                    ex.to_state(),
+                    trader.to_state(),
+                    {c: {
+                        "high_tf_prices": list(s.high_tf_prices),
+                        "low_tf_prices": list(s.low_tf_prices),
+                        "high_bound_prices": list(s.high_bound_prices),
+                        "low_bound_prices": list(s.low_bound_prices),
+                        "perfects": list(s.perfects),
+                    } for c, s in thinker_state.items()},
+                    dict(cached_epoch_ts),
+                    fills, series,
+                )
+            except Exception as _e:
+                _log(f"checkpoint flush failed: {type(_e).__name__}: {_e}")
+
         # Heartbeat
         if step and step % _heartbeat_every == 0:
             _bars = step - _last_log_step
@@ -408,4 +515,5 @@ def run_portfolio(
         fills=fills_df, series=series_df,
         coins_active=active, coins_skipped=skipped,
         bars_processed=len(all_idx),
+        bars_resumed=bars_resumed,
     )
