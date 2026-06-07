@@ -223,7 +223,11 @@ def run_coin(
     #   [3] current bar timestamp (str)
     #   [4] current bar live_price (5min open)
     #   [5] current bar fill_price (5min close)
-    _progress = [_time.monotonic(), 0, 0, None, None, None]
+    #   [6] current component name ("score" | "vote" | "rebuild" | "signal" |
+    #                              "manage_trades" | "capture" | "snapshot")
+    #   [7] component start monotonic — used to compute how long the wedge
+    #       has been inside this specific phase
+    _progress = [_time.monotonic(), 0, 0, None, None, None, "init", _time.monotonic()]
 
     stuck_dir = ws.ensure_dir(ws.run_dir(run_id) / "stuck")
 
@@ -245,6 +249,8 @@ def run_coin(
             "bar_ts": _progress[3],
             "live_price": _progress[4],
             "fill_price": _progress[5],
+            "wedged_in_component": _progress[6],
+            "component_elapsed_seconds": _time.monotonic() - _progress[7],
             "epochs_used_so_far": epochs_used,
             "fills_so_far": len(fills),
             "series_so_far": len(series),
@@ -326,7 +332,8 @@ def run_coin(
                 print(
                     f"{_engine_tag} WATCHDOG: no bar progress for {gap:.0f}s — "
                     f"stuck at epoch {ei_now}/{len(epoch_schedule)} "
-                    f"bar {bar_now}"
+                    f"bar {bar_now}  wedged_in={_progress[6]!r} "
+                    f"for {(_time.monotonic() - _progress[7]):.0f}s"
                     + (f". snapshot: {snap_path}" if snap_path else "")
                     + ". py-spy or gdb this pid to inspect.",
                     flush=True,
@@ -401,6 +408,7 @@ def run_coin(
                 new_perfects = ["inactive"] * len(TF_NAMES)
 
             _ts0 = _time.monotonic()
+            _progress[6] = "score"; _progress[7] = _ts0
             for tf_idx, (tf_name, tf_min) in enumerate(zip(TF_NAMES, TF_MINUTES)):
                 tf_df = tf_frames[tf_min]
                 if tf_df.empty:
@@ -427,6 +435,7 @@ def run_coin(
 
             # Use PREVIOUS bounds for voting, then rebuild for next bar
             _ts0 = _time.monotonic()
+            _progress[6] = "vote"; _progress[7] = _ts0
             long_count = 0
             short_count = 0
             for i in range(len(TF_NAMES)):
@@ -441,6 +450,7 @@ def run_coin(
 
             # Rebuild bounds from the just-scored TF prices for the NEXT bar
             _ts0 = _time.monotonic()
+            _progress[6] = "rebuild"; _progress[7] = _ts0
             high_bounds, low_bounds = bt_thinker.rebuild_bounds(
                 new_high_tf, new_low_tf, new_perfects,
             )
@@ -459,17 +469,20 @@ def run_coin(
 
             # ── Drive the trader ──────────────────────────────────────
             _ts0 = _time.monotonic()
+            _progress[6] = "signal"; _progress[7] = _ts0
             trader.set_signals(coin, long_count, short_count, long_levels)
             ex.set_bar(coin, live_price, fill_price)
             ex.set_time(T)
             trader.set_now(T)
             _t_signal = _time.monotonic() - _ts0
             _ts0 = _time.monotonic()
+            _progress[6] = "manage_trades"; _progress[7] = _ts0
             trader.manage_trades()
             _t_manage = _time.monotonic() - _ts0
 
             # ── Capture new fills (delta from prior log) ──────────────
             _ts0 = _time.monotonic()
+            _progress[6] = "capture"; _progress[7] = _ts0
             new_orders = ex.orders_log()[len(fills):]
             for o in new_orders:
                 fills.append(o)
