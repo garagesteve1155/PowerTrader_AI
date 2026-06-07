@@ -147,6 +147,7 @@ class BacktestExchange(Exchange):
             "side": "buy", "symbol": symbol,
             "qty": qty, "price": price, "notional": amount_usd,
             "tag": tag, "order_id": oid,
+            "cash_after": self._cash,
         })
         return OrderResult(
             order_id=oid, state="filled",
@@ -180,6 +181,7 @@ class BacktestExchange(Exchange):
             "side": "sell", "symbol": symbol,
             "qty": qty, "price": price, "notional": notional,
             "tag": None, "order_id": oid,
+            "cash_after": self._cash,
         })
         return OrderResult(
             order_id=oid, state="filled",
