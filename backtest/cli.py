@@ -285,6 +285,39 @@ for one coin's full lifecycle:
 
   grep "coin=BTC" /tmp/ray/session_latest/logs/worker-*.out
 
+What's currently working (live snapshot of active Ray workers)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+To see exactly which coin each live worker is processing and how far
+it has got — one short line per active worker — paste this into a
+second terminal while a run is in flight:
+
+  for pid in $(pgrep -f "ray::_pilot_worker"); do
+    last=$(grep -h "pid=$pid" /tmp/ray/session_latest/logs/worker-*.out 2>/dev/null | tail -1)
+    cpu=$(ps -p "$pid" -o pcpu= 2>/dev/null | tr -d ' ')
+    printf "pid=%-7s cpu=%5s%%  %s\n" "$pid" "$cpu" "$last"
+  done
+
+Healthy workers print a heartbeat every ~0.85 seconds; a stuck worker
+shows the SAME last-log-line each time you re-run the snippet. A
+worker at 0% CPU with no recent log line is either idle (between
+tasks) or dead.
+
+For a continuous live view (refresh every 2 seconds):
+
+  watch -n 2 'for pid in $(pgrep -f "ray::_pilot_worker"); do
+    last=$(grep -h "pid=$pid" /tmp/ray/session_latest/logs/worker-*.out 2>/dev/null | tail -1)
+    cpu=$(ps -p "$pid" -o pcpu= 2>/dev/null | tr -d " ")
+    printf "pid=%-7s cpu=%5s%%  %s\n" "$pid" "$cpu" "$last"
+  done'
+
+For just the coins (drop pid/cpu, list distinct coins currently
+running):
+
+  for pid in $(pgrep -f "ray::_pilot_worker"); do
+    grep -h "pid=$pid" /tmp/ray/session_latest/logs/worker-*.out 2>/dev/null \
+      | tail -1
+  done | grep -oE "coin=[A-Z]+" | sort -u
+
 If a worker hangs, use the `pid=` field from its last log line to find
 it in `ps aux | grep "ray::_pilot_worker"`, then check that worker's
 .out file for the last completed epoch.
