@@ -254,6 +254,7 @@ from pt_pricesource import ArcticPriceSource
 
 from . import workspace as ws
 from . import aggregate as agg
+from . import report as rpt
 from .engine import BacktestParams, CoinRunConfig, run_coin
 from .sweep import _train_coin_phase, default_grid, run_coin_sweep
 from .train import epoch_schedule, train_grid, train_one_epoch
@@ -285,6 +286,7 @@ def cmd_pilot(args):
     run_id = args.run_id or ws.new_run_id(prefix="pilot")
     print(f"running {len(coins)} coins: {', '.join(coins)}"
           f"   (run_id = {run_id}{'  resuming' if args.run_id else ''})")
+    print(f"report: backtest/runs/{run_id}/report.jsonl  (tail -f to monitor)")
     cfg_dict = {
         "run_id": run_id,
         "lvl": args.lvl,
@@ -294,6 +296,16 @@ def cmd_pilot(args):
         "epochs": args.epochs,
     }
 
+    rpt.event(
+        run_id, "run_started",
+        subcommand=("run" if args.epochs is None else "pilot"),
+        coins=coins,
+        params={"lvl": args.lvl, "alloc": float(args.alloc),
+                "pm": float(args.pm), "starting_usd": float(args.starting_usd),
+                "epochs": args.epochs},
+    )
+    _run_t0 = time.monotonic()
+
     if not serial:
         try:
             import ray  # type: ignore
@@ -301,20 +313,57 @@ def cmd_pilot(args):
             print("[cmd_pilot] Ray not installed — falling back to serial")
             serial = True
 
+    results: list[dict] = []
     if serial:
         for c in coins:
             print(f"\n── {c} ──")
             args.coin = c
             args.run_id = run_id
             _cmd_pilot_one(args)
-        return
+            # Serial path doesn't return a structured dict; emit a
+            # placeholder completion event with what we know.
+            rpt.event(run_id, "task_completed_serial", coin=c)
+    else:
+        import ray  # type: ignore
+        if not ray.is_initialized():
+            ray.init(ignore_reinit_error=True, log_to_driver=False)
+        remote = ray.remote(_pilot_worker)
+        futures = [remote.remote(c, cfg_dict) for c in coins]
+        # Collect results as they finish so the JSONL stays live during
+        # the run (tail -f will see completions arrive in real time).
+        pending = list(futures)
+        while pending:
+            done, pending = ray.wait(pending, num_returns=1)
+            try:
+                r = ray.get(done[0])
+            except Exception as e:
+                rpt.event(run_id, "task_error",
+                          coin="?", error=f"{type(e).__name__}: {e}")
+                continue
+            results.append(r)
+            if r.get("error"):
+                rpt.event(run_id, "task_error",
+                          coin=r["coin"], error=r["error"],
+                          elapsed_s=r.get("elapsed_s"))
+            else:
+                rpt.event(run_id, "task_completed",
+                          coin=r["coin"],
+                          elapsed_s=r.get("engine_elapsed_s", 0.0),
+                          n_trained=r.get("n_trained", 0),
+                          n_skipped=r.get("n_skipped", 0),
+                          n_failed=r.get("n_failed", 0),
+                          epochs_used=r.get("epochs_used", 0),
+                          fills=r.get("fills", 0),
+                          snapshots=r.get("snapshots", 0),
+                          pct_return=r.get("pct_return", 0.0))
 
-    import ray  # type: ignore
-    if not ray.is_initialized():
-        ray.init(ignore_reinit_error=True, log_to_driver=False)
-    remote = ray.remote(_pilot_worker)
-    futures = [remote.remote(c, cfg_dict) for c in coins]
-    results = ray.get(futures)
+    n_ok = sum(1 for r in results if not r.get("error"))
+    n_err = len(results) - n_ok
+    rpt.event(run_id, "run_completed",
+              elapsed_s=time.monotonic() - _run_t0,
+              n_ok=n_ok, n_error=n_err)
+    rpt.write_summary_text(run_id)
+
     print("\n=== per-coin summary ===")
     for r in results:
         if r.get("error"):
@@ -324,6 +373,7 @@ def cmd_pilot(args):
                   f"failed={r['n_failed']}  epochs_used={r['epochs_used']} "
                   f"fills={r['fills']}  snapshots={r['snapshots']}  "
                   f"return={r['pct_return']:+.2f}%")
+    print(f"\nreport: backtest/runs/{run_id}/report.txt")
 
 
 def _pilot_worker(coin: str, cfg: dict) -> dict:
@@ -375,7 +425,7 @@ def _pilot_worker(coin: str, cfg: dict) -> dict:
             return out
 
         _log(f"training phase begin: {sched[0].date()} → {sched[-1].date()}")
-        train_t0 = _time.time()
+        train_t0 = _time.monotonic()
         n_skip = n_fail = 0
         for asof in sched:
             ed = ws.training_epoch_dir(cfg["run_id"], asof.timestamp(), coin)
@@ -388,7 +438,7 @@ def _pilot_worker(coin: str, cfg: dict) -> dict:
         out["n_skipped"] = n_skip
         out["n_failed"] = n_fail
         out["n_trained"] = len(sched) - n_skip - n_fail
-        _log(f"training phase done in {_time.time()-train_t0:.1f}s "
+        _log(f"training phase done in {_time.monotonic()-train_t0:.1f}s "
              f"(trained={out['n_trained']} skipped={n_skip} failed={n_fail})")
 
         until = (
@@ -407,9 +457,9 @@ def _pilot_worker(coin: str, cfg: dict) -> dict:
             ),
         )
         _log(f"replay phase begin: {len(sched)} epoch(s)")
-        engine_t0 = _time.time()
+        engine_t0 = _time.monotonic()
         res = _run_coin(cfg["run_id"], rc, epoch_schedule=sched, price_source=src)
-        out["engine_elapsed_s"] = _time.time() - engine_t0
+        out["engine_elapsed_s"] = _time.monotonic() - engine_t0
         out["epochs_used"] = res.epochs_used
         out["fills"] = len(res.fills)
         out["snapshots"] = len(res.series)
@@ -580,6 +630,7 @@ def cmd_sweep(args):
     else:
         run_id = ws.new_run_id(prefix="sweep")
     print(f"sweep run_id = {run_id}")
+    print(f"report: backtest/runs/{run_id}/report.jsonl  (tail -f to monitor)")
 
     until = pd.Timestamp.utcnow()
     if until.tz is None:
@@ -591,6 +642,15 @@ def cmd_sweep(args):
           f"({'parallel' if not args.serial else 'serial'})")
     print(f"coins: {', '.join(coins)}")
 
+    rpt.event(
+        run_id, "run_started",
+        subcommand="sweep",
+        coins=coins,
+        params={"grid_size": len(grid), "total_tasks": total_tasks,
+                "serial": bool(args.serial)},
+    )
+    _sweep_t0 = time.monotonic()
+
     # Each coin's sweep is internally Ray-parallel across its 350 param
     # points. Per-coin training (param-independent) happens once before
     # that coin's fan-out. Multiple coins are dispatched sequentially —
@@ -599,10 +659,32 @@ def cmd_sweep(args):
     all_results = []
     for ci, coin in enumerate(coins, 1):
         print(f"\n── sweep [{ci}/{len(coins)}] {coin} ──")
+        _coin_t0 = time.monotonic()
+        rpt.event(run_id, "coin_started", coin=coin, index=ci, total=len(coins))
         rs = run_coin_sweep(
             run_id, coin, until=until, grid=grid, parallel=not args.serial,
         )
         all_results.extend(rs)
+        n_ok = sum(1 for r in rs if not r.error)
+        n_err = sum(1 for r in rs if r.error)
+        rpt.event(
+            run_id, "coin_completed",
+            coin=coin, elapsed_s=time.monotonic() - _coin_t0,
+            n_param_points=len(rs), n_ok=n_ok, n_error=n_err,
+            avg_fills=(sum(r.rows_fills for r in rs if not r.error)
+                       / max(n_ok, 1)),
+        )
+        for r in rs:
+            if r.error:
+                rpt.event(run_id, "task_error",
+                          coin=r.coin, params=str(r.params), error=r.error)
+
+    n_ok = sum(1 for r in all_results if not r.error)
+    n_err = sum(1 for r in all_results if r.error)
+    rpt.event(run_id, "run_completed",
+              elapsed_s=time.time() - _sweep_t0,
+              n_ok=n_ok, n_error=n_err)
+    rpt.write_summary_text(run_id)
 
     print(f"\ncompleted {len(all_results)} tasks across {len(coins)} coin(s)")
     errors = [r for r in all_results if r.error]
@@ -613,6 +695,7 @@ def cmd_sweep(args):
             print(f"  {e.coin} {e.params}: {e.error}")
     print(f"ok: {len(ok)}; avg fills/run: "
           f"{sum(r.rows_fills for r in ok)/max(len(ok),1):.1f}")
+    print(f"\nreport: backtest/runs/{run_id}/report.txt")
 
 
 def cmd_aggregate(args):
