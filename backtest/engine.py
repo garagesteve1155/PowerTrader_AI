@@ -196,7 +196,15 @@ def run_coin(
     _engine_tag = f"[engine pid={_engine_pid} coin={coin}]"
     print(f"{_engine_tag} bar-walk begin: {len(epoch_schedule)} epochs", flush=True)
     import time as _time
-    _epoch_t0 = _time.time()
+    _epoch_t0 = _time.monotonic()
+    # Intra-epoch heartbeat: log every N bars within an epoch so a stuck
+    # bar-walk can be pinpointed without waiting for the per-epoch
+    # boundary log (which only fires once an epoch fully completes).
+    _BAR_HEARTBEAT_EVERY = 500
+    # Wall-clock watchdog: emit a single WARN line if any epoch takes
+    # longer than this. Doesn't kill the worker — just shouts. Expected
+    # per-epoch time is ~7s, so 5min is ~40x the upper end of normal.
+    _EPOCH_WATCHDOG_S = 300.0
     for ei, epoch_start in enumerate(epoch_schedule):
         # Load training_data for THIS epoch
         epoch_ts = epoch_start.timestamp()
@@ -231,7 +239,22 @@ def run_coin(
             continue
 
         epochs_used += 1
+        _bars_in_epoch = len(bars)
+        _bar_idx_in_epoch = 0
+        _watchdog_fired = False
         for bar_ts_pd, row in bars.iterrows():
+            _bar_idx_in_epoch += 1
+            if _bar_idx_in_epoch % _BAR_HEARTBEAT_EVERY == 0:
+                _hb_elapsed = _time.monotonic() - _epoch_t0
+                print(f"{_engine_tag} epoch {ei + 1}/{len(epoch_schedule)} "
+                      f"{epoch_start.date()} bar {_bar_idx_in_epoch}/{_bars_in_epoch} "
+                      f"elapsed={_hb_elapsed:.1f}s", flush=True)
+                if (not _watchdog_fired) and _hb_elapsed > _EPOCH_WATCHDOG_S:
+                    _watchdog_fired = True
+                    print(f"{_engine_tag} WATCHDOG: epoch {ei + 1} has been "
+                          f"running {_hb_elapsed:.0f}s on bar "
+                          f"{_bar_idx_in_epoch}/{_bars_in_epoch} — possibly stuck",
+                          flush=True)
             T = float(bar_ts_pd.timestamp())
             live_price = float(row["open"])
             fill_price = float(row["close"])
@@ -365,11 +388,11 @@ def run_coin(
 
         # Per-epoch progress beacon — visible in Ray worker .out file so
         # a stuck replay can be pinpointed to a specific epoch.
-        _dt = _time.time() - _epoch_t0
+        _dt = _time.monotonic() - _epoch_t0
         print(f"{_engine_tag} epoch {ei + 1}/{len(epoch_schedule)} "
               f"{epoch_start.date()} done in {_dt:.1f}s  "
               f"fills={len(fills)} snapshots={len(series)}", flush=True)
-        _epoch_t0 = _time.time()
+        _epoch_t0 = _time.monotonic()
 
     fills_df = pd.DataFrame(fills)
     series_df = pd.DataFrame(series)
