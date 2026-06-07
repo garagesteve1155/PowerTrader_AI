@@ -495,8 +495,10 @@ def run_coin(
                 qty = holdings.get(coin, 0.0)
                 pos_val = qty * live_price
                 cash = ex.get_buying_power() or 0.0
+                _ts_pd = pd.Timestamp(T, unit="s", tz="UTC")
                 series.append({
-                    "ts": pd.Timestamp(T, unit="s", tz="UTC"),
+                    "ts": _ts_pd,
+                    "ts_iso": _ts_pd.strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "live_price": live_price,
                     "qty": qty,
                     "position_usd": pos_val,

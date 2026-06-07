@@ -9,10 +9,18 @@ bars so all subsequent get_price / place_* calls reflect the new bar.
 
 from __future__ import annotations
 
+import datetime as _dt
 import uuid
 from typing import Dict, List, Optional, Tuple
 
 from exchange_api import Exchange, OrderResult
+
+
+def _ts_iso(ts_seconds: float) -> str:
+    """Render a Unix-seconds float as PowerTrader's canonical UTC ISO string."""
+    return _dt.datetime.fromtimestamp(
+        float(ts_seconds), _dt.timezone.utc,
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class BacktestExchange(Exchange):
@@ -134,7 +142,9 @@ class BacktestExchange(Exchange):
 
         oid = str(uuid.uuid4())
         self._orders_log.append({
-            "ts": self._now_ts, "side": "buy", "symbol": symbol,
+            "ts": self._now_ts,
+            "ts_iso": _ts_iso(self._now_ts),
+            "side": "buy", "symbol": symbol,
             "qty": qty, "price": price, "notional": amount_usd,
             "tag": tag, "order_id": oid,
         })
@@ -165,7 +175,9 @@ class BacktestExchange(Exchange):
 
         oid = str(uuid.uuid4())
         self._orders_log.append({
-            "ts": self._now_ts, "side": "sell", "symbol": symbol,
+            "ts": self._now_ts,
+            "ts_iso": _ts_iso(self._now_ts),
+            "side": "sell", "symbol": symbol,
             "qty": qty, "price": price, "notional": notional,
             "tag": None, "order_id": oid,
         })

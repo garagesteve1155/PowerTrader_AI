@@ -19,6 +19,26 @@ import pandas as pd
 from . import workspace as ws
 
 
+_TS_ISO_FMT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def _with_ts_iso(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with a `ts_iso` column derived from the DatetimeIndex.
+
+    Lets parquet viewers (DuckDB, parquet-tools, the VS Code parquet
+    extension etc.) show human-readable timestamps without needing the
+    pandas roundtrip. The native DatetimeIndex is unchanged so all
+    downstream pandas usage keeps working.
+    """
+    if df.empty:
+        return df
+    out = df.copy()
+    idx = out.index
+    if hasattr(idx, "strftime"):
+        out["ts_iso"] = idx.strftime(_TS_ISO_FMT)
+    return out
+
+
 def per_coin_hourly(series: pd.DataFrame) -> pd.DataFrame:
     """Resample engine snapshots (already hourly if record_every_n=12) into a
     clean hourly series with derived columns:
@@ -51,7 +71,7 @@ def write_per_coin_hourly(run_id: str, coin: str) -> Optional[pd.DataFrame]:
     if hourly.empty:
         return hourly
     out_dir = ws.ensure_dir(ws.run_dir(run_id) / "agg")
-    hourly.to_parquet(out_dir / f"{coin}_hourly.parquet")
+    _with_ts_iso(hourly).to_parquet(out_dir / f"{coin}_hourly.parquet")
     return hourly
 
 
@@ -89,8 +109,8 @@ def portfolio_hourly(run_id: str, coins: list[str]) -> pd.DataFrame:
     portfolio["pct_return"] = (portfolio["total_account_value"] / start - 1.0) * 100.0
 
     out_dir = ws.ensure_dir(ws.run_dir(run_id) / "agg")
-    portfolio.to_parquet(out_dir / "portfolio_hourly.parquet")
-    wide.to_parquet(out_dir / "portfolio_wide_hourly.parquet")
+    _with_ts_iso(portfolio).to_parquet(out_dir / "portfolio_hourly.parquet")
+    _with_ts_iso(wide).to_parquet(out_dir / "portfolio_wide_hourly.parquet")
     return portfolio
 
 
@@ -106,5 +126,5 @@ def portfolio_daily(run_id: str, portfolio: Optional[pd.DataFrame] = None) -> pd
     daily = portfolio.resample("1d").last().ffill()
     daily["daily_pct_return"] = daily["total_account_value"].pct_change() * 100.0
     out_dir = ws.ensure_dir(ws.run_dir(run_id) / "agg")
-    daily.to_parquet(out_dir / "portfolio_daily.parquet")
+    _with_ts_iso(daily).to_parquet(out_dir / "portfolio_daily.parquet")
     return daily
