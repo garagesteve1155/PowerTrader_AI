@@ -85,22 +85,24 @@ Which options each subcommand accepts:
 
   Option            train  pilot  run    sweep  aggregate
   ----------------  -----  -----  -----  -----  ---------
-  --coin            opt    opt    opt    opt    --coins (plural, REQ)
+  --coin            opt    opt    opt    opt    opt
   --epochs          yes    yes    --     --     --
   --lvl             --     yes    yes    --     --
   --alloc           --     yes    yes    --     --
   --pm              --     yes    yes    --     --
   --starting-usd    --     yes    yes    --     --
-  --run-id          yes    yes    yes    --     --
+  --run-id          yes    yes    yes    --     opt (or positional)
   --serial          yes    yes    yes    yes    --
-  run_id (positional)                            REQ
+  run_id (positional)                            opt (or --run-id)
 
 Legend: opt = optional, REQ = required, yes = accepted, -- = not accepted.
 
-Note: `aggregate` takes the run_id as a *positional* argument (not
---run-id) and uses `--coins` (plural) for the coin list; every other
-subcommand uses `--coin` (singular) accepting a single symbol, a
-comma-separated list, or omitted (meaning every coin in pt_config.json).
+Note: `aggregate` accepts the run_id as EITHER a positional argument
+OR via --run-id — pick whichever is more convenient. It also accepts
+the coin list via `--coin` (preferred), `--coins` (legacy alias kept
+for back-compat with earlier scripts), or omitted (meaning every coin
+in pt_config.json). All four subcommands now use --coin with identical
+semantics: single symbol, comma-list, or omit-for-all.
 
 Per-option semantics
 ~~~~~~~~~~~~~~~~~~~~
@@ -835,9 +837,23 @@ def cmd_sweep(args):
 
 
 def cmd_aggregate(args):
-    run_id = args.run_id
-    coins = [c.upper() for c in args.coins.split(",")]
-    print(f"aggregating run_id={run_id}, coins={coins}")
+    # Accept run_id from either the positional or the --run-id form.
+    run_id = args.run_id_pos or args.run_id_kwarg
+    if not run_id:
+        print("aggregate: run_id required "
+              "(positional 'run_id' or --run-id <id>)")
+        return
+
+    # Accept the coin list from --coin (preferred), --coins (legacy alias),
+    # or default to every coin in pt_config.json — same shape as the
+    # other subcommands.
+    coin_arg = args.coin if args.coin is not None else args.coins_legacy
+    coins = _resolve_coins(coin_arg)
+    if not coins:
+        print(f"aggregate: no coins resolved (coin_arg={coin_arg!r})")
+        return
+
+    print(f"aggregating run_id={run_id}, coins=({len(coins)}) {', '.join(coins)}")
     portfolio = agg.portfolio_hourly(run_id, coins)
     daily = agg.portfolio_daily(run_id, portfolio)
     print(f"portfolio_hourly rows: {len(portfolio)}, daily rows: {len(daily)}")
@@ -901,8 +917,25 @@ def main():
     sweep.set_defaults(func=cmd_sweep)
 
     aggr = sub.add_parser("aggregate", help="Aggregate per-coin -> portfolio")
-    aggr.add_argument("run_id")
-    aggr.add_argument("--coins", required=True, help="Comma-separated coin list")
+    aggr.add_argument(
+        "run_id_pos", nargs="?", default=None,
+        metavar="run_id",
+        help="Run ID to aggregate (positional, or use --run-id)",
+    )
+    aggr.add_argument(
+        "--run-id", dest="run_id_kwarg", default=None,
+        help="Run ID to aggregate (alternative to the positional form)",
+    )
+    aggr.add_argument(
+        "--coin", default=None,
+        help="Coin symbol, comma-separated list, or omit for all "
+             "pt_config.json coins (the default).",
+    )
+    # Backwards-compat alias — older invocations used --coins (plural).
+    aggr.add_argument(
+        "--coins", dest="coins_legacy", default=None,
+        help=argparse.SUPPRESS,
+    )
     aggr.set_defaults(func=cmd_aggregate)
 
     args = p.parse_args()
