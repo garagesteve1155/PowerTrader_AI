@@ -41,6 +41,30 @@ from pt_env import utcnow
 logging.getLogger("trader-demo").setLevel(logging.WARNING)
 logging.getLogger("trader-kraken").setLevel(logging.WARNING)
 
+
+class _SuppressDCAFailedFilter(logging.Filter):
+    """Drop the per-coin 'DCA buy FAILED for X' warning.
+
+    Fires every time the trader's stale-buying-power cache rejects a DCA
+    in favour of an earlier-iterated coin: get_buying_power() is fetched
+    once at the top of manage_trades, then multiple coins may buy in the
+    same tick, drawing real cash below the cached snapshot. The exchange
+    correctly rejects, the trader logs a warning, no state change.
+
+    Backtest-only — the engine surfaces the count via the per-snapshot
+    `dca_rejects_<COIN>` columns in series.parquet so we don't lose the
+    signal, just the noise.
+    """
+    _PREFIX = "DCA buy FAILED for "
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.getMessage().startswith(self._PREFIX)
+
+
+_DCA_FILTER = _SuppressDCAFailedFilter()
+logging.getLogger("trader-demo").addFilter(_DCA_FILTER)
+logging.getLogger("trader-kraken").addFilter(_DCA_FILTER)
+
 from .exchange import BacktestExchange
 
 

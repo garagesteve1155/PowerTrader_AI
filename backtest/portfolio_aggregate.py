@@ -162,3 +162,58 @@ def write_portfolio_daily(run_id: str) -> Optional[pd.DataFrame]:
     out_path = run_dir / "portfolio_daily.parquet"
     daily.to_parquet(out_path)
     return daily
+
+
+def write_sweep_daily(parent_run_id: str) -> Optional[pd.DataFrame]:
+    """Stitch every sweep sub-run's portfolio_daily.parquet into one
+    long-format timeseries with the (lvl, alloc, pm) key columns.
+
+    Reads runs/<parent>/sweep_results.parquet (must have lvl, alloc, pm,
+    sub_run_id columns) and each referenced sub-run's
+    portfolio_daily.parquet. Writes runs/<parent>/sweep_daily.parquet.
+
+    Schema (long format, one row per param-set × day):
+      lvl, alloc, pm, sub_run_id,
+      ts, ts_iso, total_account_value, daily_pct_return,
+      contrib_pct_<COIN> ...one per active coin
+    """
+    parent_dir = ws.run_dir(parent_run_id)
+    results_path = parent_dir / "sweep_results.parquet"
+    if not results_path.exists():
+        return None
+    results = pd.read_parquet(results_path)
+    if results.empty:
+        return None
+
+    frames: list[pd.DataFrame] = []
+    for _, row in results.iterrows():
+        sub_id = str(row["sub_run_id"])
+        sub_path = ws.run_dir(sub_id) / "portfolio_daily.parquet"
+        if not sub_path.exists():
+            continue
+        d = pd.read_parquet(sub_path)
+        if d.empty:
+            continue
+        d = d.reset_index().rename(columns={"index": "ts"})
+        # portfolio_daily is indexed by ts, so reset_index gives a ts col;
+        # if the index was already called "ts" this is a no-op.
+        if "ts" not in d.columns:
+            d["ts"] = pd.to_datetime(d.iloc[:, 0])
+        d["lvl"] = int(row["lvl"])
+        d["alloc"] = float(row["alloc"])
+        d["pm"] = float(row["pm"])
+        d["sub_run_id"] = sub_id
+
+        leading = ["lvl", "alloc", "pm", "sub_run_id",
+                   "ts", "ts_iso",
+                   "total_account_value", "daily_pct_return"]
+        contrib_cols = sorted(c for c in d.columns if c.startswith("contrib_pct_"))
+        ordered = [c for c in (leading + contrib_cols) if c in d.columns]
+        frames.append(d[ordered])
+
+    if not frames:
+        return None
+    out = pd.concat(frames, ignore_index=True)
+    out_path = parent_dir / "sweep_daily.parquet"
+    out.to_parquet(out_path)
+    return out

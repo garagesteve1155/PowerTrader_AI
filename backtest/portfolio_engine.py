@@ -33,9 +33,11 @@ import os
 import pickle
 import threading
 import time as _time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 import pt_trader
@@ -77,6 +79,10 @@ class PortfolioRunConfig:
     from_date: Optional[pd.Timestamp] = None
     snapshot_every_n: int = 288   # 288 × 5min = 24h = daily
     params: PortfolioParams = field(default_factory=PortfolioParams)
+    # When set, training_data.json is read from runs/<training_run_id>/
+    # instead of runs/<run_id>/. Lets a sweep share one trained universe
+    # across all its sub-runs.
+    training_run_id: Optional[str] = None
 
 
 @dataclass
@@ -163,6 +169,10 @@ def run_portfolio(
     if price_source is None:
         price_source = ArcticPriceSource()
 
+    # Sweep sub-runs read training from a shared parent; standalone
+    # runs train into and read from their own run_id directory.
+    training_id = cfg.training_run_id or run_id
+
     tag = f"[portfolio pid={os.getpid()}]"
 
     def _log(msg: str) -> None:
@@ -203,11 +213,21 @@ def run_portfolio(
             if grid5.empty:
                 skipped.append(c)
                 continue
+        # Phase 2b: precompute numpy column arrays + dict[int_ns -> row_idx]
+        # for the master kucoin5 grid. Eliminates ~88s of pandas `.loc[T]`
+        # overhead per month from the hot loop in favour of O(1) dict
+        # lookup + int-indexed numpy reads.
+        g5_ts_ns = grid5.index.values.astype("datetime64[ns]").view("i8")
         coin_meta[c] = {
             "sched": sched,
             "epoch_starts": [s.timestamp() for s in sched],
-            "grid5": grid5,
+            "grid5": grid5,                # kept for the union-of-indices below
             "first_ts": grid5.index[0],
+            "first_ts_ns": int(g5_ts_ns[0]),
+            "grid5_idx_by_ns": {int(g5_ts_ns[i]): i for i in range(len(g5_ts_ns))},
+            "grid5_lows":   grid5["low"].values.astype(np.float64),
+            "grid5_highs":  grid5["high"].values.astype(np.float64),
+            "grid5_closes": grid5["close"].values.astype(np.float64),
         }
 
     if skipped:
@@ -237,6 +257,21 @@ def run_portfolio(
                 break
     _log(f"loaded {len(tf_frames)} TF candle frames")
 
+    # Phase 2b: pre-extract int64-ns timestamp arrays + float64 open
+    # arrays per (coin, tf). The hot loop uses np.searchsorted over the
+    # int array (~5× faster than pandas Index.searchsorted) and an
+    # int-indexed numpy read in place of `df.iloc[pos]["open"]` (which
+    # used to box a full Series per call).
+    tf_ts_ns: Dict[tuple, np.ndarray] = {}
+    tf_opens: Dict[tuple, np.ndarray] = {}
+    for (c, tf_min), df in tf_frames.items():
+        if df.empty:
+            tf_ts_ns[(c, tf_min)] = np.empty(0, dtype=np.int64)
+            tf_opens[(c, tf_min)] = np.empty(0, dtype=np.float64)
+            continue
+        tf_ts_ns[(c, tf_min)] = df.index.values.astype("datetime64[ns]").view("i8")
+        tf_opens[(c, tf_min)] = df["open"].values.astype(np.float64)
+
     # ── Master timeline = union of all coins' kucoin5 indices ────────
     _t0 = _time.monotonic()
     all_idx = pd.DatetimeIndex(
@@ -259,6 +294,13 @@ def run_portfolio(
     pt_trader.EXCLUDED_COINS = set()
     # LTH inherits from prod pt_config.json (already loaded into
     # pt_trader.LONG_TERM_SYMBOLS at import time). Leave it.
+
+    # `manage_trades` calls `_refresh_paths_and_symbols()` every tick to
+    # hot-reload prod GUI changes. That overwrites the param overrides
+    # we just set with whatever's in pt_config.json. Neutralise it for
+    # the lifetime of this process — sweep param differentiation is
+    # impossible otherwise.
+    pt_trader._refresh_paths_and_symbols = lambda: None
 
     ex = BacktestExchange(starting_usd=cfg.starting_usd)
     trader = BacktestTrader(ex)
@@ -319,21 +361,40 @@ def run_portfolio(
     _heartbeat_every = 1000
     _walk_t0 = _time.monotonic()
     _last_log_step = 0
+    _walk_t0_reset = False
+    # Sliding window of (processed_bars, monotonic_time) over the last
+    # 100 heartbeats = last ~100,000 processed bars. ETA derived from
+    # the window gives a far more accurate projection in full-history
+    # runs: per-bar cost grows over time as more coins come online, so
+    # a global average underestimates the time still to come.
+    _rate_window: deque = deque(maxlen=100)
+    _rate_window.append((0, _walk_t0))
     for step, T_pd in enumerate(all_idx):
         T = float(T_pd.timestamp())
         if T <= resume_skip_until_ts:
             bars_resumed += 1
             continue
+        if not _walk_t0_reset:
+            # On resume, the skip-scan ran through possibly millions of
+            # bars before reaching the resume point. Reset the clock here
+            # so processing-rate + eta only count work that's actually
+            # done.
+            _walk_t0 = _time.monotonic()
+            _rate_window.clear()
+            _rate_window.append((0, _walk_t0))
+            _walk_t0_reset = True
         _progress[0] = _time.monotonic()
         _progress[1] = step
 
+        # Phase 2b: cache T's int64 nanosecond value for dict lookups.
+        T_ns = T_pd.value
+
         for c in active:
             meta = coin_meta[c]
-            if T_pd < meta["first_ts"]:
+            if T_ns < meta["first_ts_ns"]:
                 continue
-            try:
-                row = meta["grid5"].loc[T_pd]
-            except KeyError:
+            idx = meta["grid5_idx_by_ns"].get(T_ns)
+            if idx is None:
                 continue   # coin has no bar at this exact T
 
             # Epoch swap if we've crossed the boundary
@@ -344,7 +405,7 @@ def run_portfolio(
             if cached_epoch_ts[c] != ep_ts:
                 cached_epoch_ts[c] = ep_ts
                 td_path = (
-                    ws.training_epoch_dir(run_id, ep_ts, c)
+                    ws.training_epoch_dir(training_id, ep_ts, c)
                     / "training_data.json"
                 )
                 if not td_path.exists():
@@ -361,8 +422,23 @@ def run_portfolio(
             if parsed_td[c] is None:
                 continue
 
-            live_price = float(row["open"])
-            fill_price = float(row["close"])
+            # Asymmetric decision-price model — mirrors what a live trader
+            # ticking continuously inside a 5-min bar would have seen:
+            #   buy decisions  ← bar LOW   (the dip that triggers entry/DCA)
+            #   sell decisions ← bar HIGH × (1-trailing_gap_pct/100)
+            #   fill / MTM     ← bar CLOSE (realistic execution after signal)
+            # No look-ahead: LOW and HIGH are both within this bar's window.
+            bar_low = float(meta["grid5_lows"][idx])
+            bar_high = float(meta["grid5_highs"][idx])
+            bar_close = float(meta["grid5_closes"][idx])
+            _gap = float(getattr(pt_trader, "TRAILING_GAP_PCT", 0.5) or 0.5) / 100.0
+            buy_price = bar_low
+            sell_price = bar_high * (1.0 - _gap)
+            fill_price = bar_close
+            # The TF voting code uses `live_price` as the trader's current
+            # view. Use the buy-decision price so "long" votes fire on the
+            # dip — matches the live trader's continuous-tick perspective.
+            live_price = buy_price
 
             # Score, vote, rebuild (lifted verbatim from engine.py)
             st = thinker_state[c]
@@ -375,16 +451,16 @@ def run_portfolio(
                 new_perfects = ["inactive"] * len(TF_NAMES)
 
             for tf_idx, (tf_name, tf_min) in enumerate(zip(TF_NAMES, TF_MINUTES)):
-                tf_df = tf_frames[(c, tf_min)]
-                if tf_df.empty:
+                ts_arr = tf_ts_ns[(c, tf_min)]
+                if ts_arr.size == 0:
                     continue
-                bs_unix = _bar_start_for_tf(T, tf_min)
-                bs_ts = pd.Timestamp(bs_unix, unit="s", tz="UTC")
-                pos = tf_df.index.searchsorted(bs_ts, side="right") - 1
+                # Phase 2b: int-ns searchsorted + int-indexed numpy read.
+                # Old code rebuilt a pd.Timestamp + boxed a Series per call.
+                bs_ns = _bar_start_for_tf(T, tf_min) * 1_000_000_000
+                pos = int(np.searchsorted(ts_arr, bs_ns, side="right")) - 1
                 if pos < 0:
                     continue
-                bar_row = tf_df.iloc[pos]
-                open_p = float(bar_row["open"])
+                open_p = float(tf_opens[(c, tf_min)][pos])
                 hd, ld, status = bt_thinker.score_tf(
                     parsed_td[c][tf_name], open_p, live_price,
                 )
@@ -422,7 +498,7 @@ def run_portfolio(
             long_levels = sorted(uniq.values(), reverse=True)
 
             trader.set_signals(c, long_count, short_count, long_levels)
-            ex.set_bar(c, live_price, fill_price)
+            ex.set_bar(c, buy_price, sell_price, fill_price)
 
             st.high_tf_prices = new_high_tf
             st.low_tf_prices = new_low_tf
@@ -443,13 +519,18 @@ def run_portfolio(
         if step % cfg.snapshot_every_n == 0:
             tot_pos_val = 0.0
             snap = {"ts": T_pd, "ts_iso": _iso(T_pd), "cash": ex._cash}
+            rejects = ex.drain_dca_rejects()
             for c in active:
                 qty = float(ex._holdings.get(c, 0.0) or 0.0)
-                price = float(ex._bar_open_prices.get(c, 0.0) or 0.0)
+                price = float(ex._fill_prices.get(c, 0.0) or 0.0)
                 pos_val = qty * price
                 tot_pos_val += pos_val
                 snap[f"qty_{c}"] = qty
                 snap[f"position_usd_{c}"] = pos_val
+                r = rejects.get(c) or {}
+                snap[f"dca_rejects_{c}_no_price"] = int(r.get("no_price", 0))
+                snap[f"dca_rejects_{c}_zero_amount"] = int(r.get("zero_amount", 0))
+                snap[f"dca_rejects_{c}_no_cash"] = int(r.get("no_cash", 0))
             snap["total_position_usd"] = tot_pos_val
             snap["total_account_value"] = ex._cash + tot_pos_val
             series.append(snap)
@@ -474,24 +555,40 @@ def run_portfolio(
             except Exception as _e:
                 _log(f"checkpoint flush failed: {type(_e).__name__}: {_e}")
 
-        # Heartbeat
-        if step and step % _heartbeat_every == 0:
-            _bars = step - _last_log_step
-            _dt_sec = _time.monotonic() - _walk_t0
-            _last_log_step = step
-            _eta_s = _dt_sec * (len(all_idx) - step) / max(step, 1)
-            _log(f"bar {step:,}/{len(all_idx):,} "
+        # Heartbeat. Counts only PROCESSED bars (post-resume) so the
+        # rate/eta are honest even when most early bars were just
+        # resume-skipped.
+        processed = step - bars_resumed
+        if processed and processed % _heartbeat_every == 0 and processed != _last_log_step:
+            _now = _time.monotonic()
+            _last_log_step = processed
+            _rate_window.append((processed, _now))
+            remaining = (len(all_idx) - bars_resumed) - processed
+            # ETA from the sliding window — anchor = oldest entry, which
+            # is at most 100 heartbeats (~100k bars) behind.
+            _anchor_p, _anchor_t = _rate_window[0]
+            _wp = processed - _anchor_p
+            _wt = _now - _anchor_t
+            if _wp > 0 and _wt > 0:
+                _eta_s = _wt * remaining / _wp
+            else:
+                # Falls back to global rate if window is degenerate
+                # (first heartbeat).
+                _eta_s = (_now - _walk_t0) * remaining / max(processed, 1)
+            _log(f"bar {processed:,}/{len(all_idx) - bars_resumed:,} "
                  f"{_iso(T_pd)}  "
                  f"cash=${ex._cash:,.0f} "
-                 f"total=${ex._cash + sum((ex._holdings.get(c,0.0) or 0.0) * (ex._bar_open_prices.get(c,0.0) or 0.0) for c in active):,.0f} "
+                 f"total=${ex._cash + sum((ex._holdings.get(c,0.0) or 0.0) * (ex._fill_prices.get(c,0.0) or 0.0) for c in active):,.0f} "
                  f"fills={len(fills)}  "
                  f"eta={_eta_s/60:.1f}min")
 
     _watchdog_stop.set()
 
     _walk_total = _time.monotonic() - _walk_t0
+    _walk_bars = len(all_idx) - bars_resumed
     _log(f"walk done in {_walk_total:.1f}s "
-         f"({len(all_idx)/max(_walk_total,1e-9):.0f} bars/s)")
+         f"({_walk_bars/max(_walk_total,1e-9):.0f} bars/s; "
+         f"{bars_resumed:,} resumed)")
 
     # Write outputs
     fills_df = pd.DataFrame(fills)

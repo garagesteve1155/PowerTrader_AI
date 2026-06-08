@@ -1,371 +1,173 @@
 """
-Command-line driver for the PowerTrader backtest pipeline.
+Command-line driver for the PowerTrader joint multi-coin backtest.
 
-Pipeline overview
------------------
-The pipeline factors into three independent stages, all sharing one
-`run_id` directory tree:
+Pipeline
+--------
+The pipeline is two stages, sharing one `run_id` directory tree:
 
   1) Training. For each coin × 14-day epoch, invoke pt_trainer with
-     asof_ts set so no post-epoch data leaks in. Param-independent —
+     `asof_ts` set so no post-epoch data leaks in. Param-independent —
      produced once, reused across every replay below.
        runs/<run_id>/training/<YYYYMMDD>/<COIN>/training_data.json
        runs/<run_id>/training/<YYYYMMDD>/<COIN>/trainer_state.json
 
-  2) Replay. Walk the 5min kucoin5 grid, score the 7 trained TFs at
-     each bar, vote, drive a BacktestTrader subclass of the prod
-     Trader, and record fills + state snapshots. Per (coin, params).
-       runs/<run_id>/fills/<COIN>.parquet
-       runs/<run_id>/series/<COIN>.parquet
+  2) Joint replay. ONE shared cash pool walks every coin's 5min kucoin5
+     grid in lockstep, scoring all 7 trained TFs per coin per bar,
+     letting the prod Trader logic open / DCA / close across the full
+     universe. Cash is finite — coins compete for it.
+       runs/<run_id>/fills.parquet         multi-coin fill log
+       runs/<run_id>/series.parquet        daily portfolio snapshots
+       runs/<run_id>/portfolio_daily.parquet   derived attribution
+       runs/<run_id>/portfolio_checkpoint.pkl  resumable engine state
 
-  3) Aggregation. Resample snapshots to hourly, sum to portfolio
-     level, derive daily % returns.
-       runs/<run_id>/agg/<COIN>_hourly.parquet
-       runs/<run_id>/agg/portfolio_hourly.parquet
-       runs/<run_id>/agg/portfolio_daily.parquet
-
-The runs/ directory is gitignored. Every stage is resumable: if a
-training_data.json or fills/series parquet already exists for a given
-(run, coin, asof), it is reused and the step is skipped.
-
-The recommended large-scale workflow is to run stages explicitly so the
-expensive training phase is done once and shared:
-
-    # Phase A — produce all training data, Ray-parallel
-    python3 -m backtest.cli train
-
-    # Phase B — default-params replay over the same training
-    python3 -m backtest.cli run    --run-id <phase_a_run_id>
-
-    # Phase C — 3D sweep over the same training
-    python3 -m backtest.cli sweep  --run-id <phase_a_run_id>
-
-`pilot` and `run` will also train missing epochs on the fly if you skip
-Phase A, but their training is per-coin serial — slower than `train`.
+Both stages are resumable: if `training_data.json` exists for a given
+(run_id, coin, asof) it is reused; if a `portfolio_checkpoint.pkl`
+exists, the replay engine restarts from the last snapshot boundary.
 
 Subcommands
 -----------
 train
-    Produce training_data.json for every (coin × epoch). Ray-parallel
-    across the full grid by default (one Ray task per epoch). No replay
-    is performed. Use this as Phase A before launching `run` or `sweep`
-    against the same --run-id so they reuse the cached training instead
-    of doing it again per-coin.
+    Produce `training_data.json` artifacts for the coin × epoch grid.
+    Ray-parallel by default (one Ray task per epoch). No replay
+    happens here. Use this as Phase A before launching `run` against
+    the same `--run-id` so the replay can reuse the cached training.
 
 pilot
-    Train + run a single coin (or list, or all configured coins) for a
-    bounded number of 14-day epochs. The replay window is capped at the
-    end of the last requested epoch so pilots stay short (~13s/epoch).
-    Use this to validate end-to-end before launching a full run. Training
-    inside pilot is per-coin serial; pass --run-id to a previous `train`
-    output to skip it entirely.
+    Joint backtest defaulting to the last ~6 months — minutes of
+    wall-clock, not hours. Use to validate end-to-end before a full
+    `run`. Requires `--run-id` of a prior `train` run (it does NOT
+    train inline; coins lacking training_data.json are silently
+    skipped per epoch).
 
 run
-    Same as `pilot` but with no `--epochs` cap — replays from each coin's
-    earliest viable date up to "now". Hours of compute for one coin's
-    full ~6-year history; days for all 30 coins serially. Pass --run-id
-    to resume or to reuse a `train` artifact.
+    Joint backtest over the full viable history (each coin enters
+    once it has 100 weekly candles + a trained TF). Hours of compute
+    for the default 28-coin universe. Requires `--run-id` of a prior
+    `train` run; same `--run-id` on a later invocation resumes from
+    the most recent snapshot.
 
 sweep
-    3D parameter sweep over (trade_start_level, start_allocation_pct,
-    pm_start_pct). 350 param points × N coins. Each coin's training
-    schedule is (re)materialised via train_grid (Ray-parallel across
-    epochs) before fanning out a replay task per (coin, params) — also
-    Ray-parallel. Pass --run-id to reuse an existing `train` output.
-    `--serial` disables Ray for both phases.
+    3D parameter sweep over `(trade_start_level, start_allocation_pct,
+    pm_start_pct)`. Requires `--run-id` of a prior `train` run whose
+    training tree is shared across every sweep sub-run. Each grid
+    point becomes one Ray task that calls the joint engine over the
+    full coin universe. Default grid is 3×3×3 = 27 points; override
+    with `--lvls`, `--allocs`, `--pms`. Per-point outputs land in
+    `runs/<parent>/sweep/l<L>_a<A>_p<P>/`; rollup metrics in
+    `runs/<parent>/sweep_results.parquet` and the long-format daily
+    timeseries in `runs/<parent>/sweep_daily.parquet`.
 
 aggregate
-    Build hourly + daily aggregations from existing fill/series parquets
-    in a run. Run after pilot/run/sweep to populate the agg/ subdir that
-    backtest/research.py reads.
+    Re-derive `portfolio_daily.parquet` from an existing run's
+    `fills.parquet` + `series.parquet`. Only needed if you want to
+    rebuild attribution after editing `portfolio_aggregate.py` —
+    `run`/`pilot` already produce it inline.
 
-Options
--------
-Which options each subcommand accepts:
+Common options
+--------------
+--coin            Single symbol (BTC), comma-separated list
+                  (BTC,ETH,SOL), or omitted to default to every coin
+                  in `pt_config.json`. Same shape on every subcommand.
 
-  Option            train  pilot  run    sweep  aggregate
-  ----------------  -----  -----  -----  -----  ---------
-  --coin            opt    opt    opt    opt    opt
-  --epochs          yes    yes    --     --     --
-  --lvl             --     yes    yes    --     --
-  --alloc           --     yes    yes    --     --
-  --pm              --     yes    yes    --     --
-  --starting-usd    --     yes    yes    --     --
-  --run-id          yes    yes    yes    --     opt (or positional)
-  --serial          yes    yes    yes    yes    --
-  run_id (positional)                            opt (or --run-id)
+--run-id          The shared dir under runs/ for everything in this
+                  pipeline.
+                    train: omit for a fresh timestamped id; reuse
+                      to resume (skips epochs already on disk).
+                    run/pilot/sweep: REQUIRED, must point at a prior
+                      train run_id. Replay outputs (fills, series,
+                      portfolio_daily, checkpoint) land beside the
+                      training tree in the same dir. Re-issuing
+                      run/pilot with the same id resumes from the
+                      engine checkpoint.
 
-Legend: opt = optional, REQ = required, yes = accepted, -- = not accepted.
+--serial          Disable Ray; serialise the inner fan-out. Accepted
+                  on `train` (parallelism is per epoch) and `sweep`
+                  (parallelism is per param point). `run`/`pilot`
+                  walk one shared portfolio path-dependently, so
+                  there is no parallelism to disable.
 
-Note: `aggregate` accepts the run_id as EITHER a positional argument
-OR via --run-id — pick whichever is more convenient. It also accepts
-the coin list via `--coin` (preferred), `--coins` (legacy alias kept
-for back-compat with earlier scripts), or omitted (meaning every coin
-in pt_config.json). All four subcommands now use --coin with identical
-semantics: single symbol, comma-list, or omit-for-all.
-
-Per-option semantics
-~~~~~~~~~~~~~~~~~~~~
-
---coin <symbol> | <a,b,c> | omitted
-    Single coin (e.g. ETH), comma-separated list (e.g. BTC,ETH,SOL),
-    or omitted to default to every coin in pt_config.json. Each coin
-    gets its own $1000 starting capital and its own subtree under
-    runs/<run_id>/. train fans the coin × epoch grid across Ray; pilot
-    and run fan out one Ray task per coin (replay within a coin is
-    path-dependent and stays sequential across epochs).
-
---run-id <existing>
-    Resume / reuse an existing run. The trainer skips epochs whose
-    training_data.json is already on disk; the engine skips epochs with
-    no training_data.json and resumes from the per-coin checkpoint
-    pickle for replay state. Passing the same --run-id thus picks up
-    exactly where the previous invocation stopped, or composes
-    Phase A + Phase B.
-
---epochs N
-    Cap the schedule to the first N 14-day epochs per coin.
-    train: caps the training grid (default: all viable).
-    pilot: caps both training and replay (default 2).
-    Not accepted on `run` — `run` always does the full viable schedule;
-    use `pilot --epochs N` for a bounded smoke run.
-
+Joint-replay-only options
+~~~~~~~~~~~~~~~~~~~~~~~~~
 --lvl, --alloc, --pm
-    Inline sweep parameters for pilot/run. Defaults match the prod
-    pt_config.json values (lvl=2, alloc=1%, pm=4%).
-    train doesn't take these because training is param-independent.
-    sweep doesn't take them because the whole point of sweep is to
-    vary them across the default 3D grid.
+                  Trader knobs that drive the joint replay. Defaults
+                  match prod (lvl=2, alloc=1%, pm=4%).
+--starting-usd    Initial cash for the shared wallet. Default 10000.
+--from-date       ISO date (YYYY-MM-DD) — earliest snapshot the
+                  engine considers. Omit on `run` for "earliest
+                  viable per coin"; `pilot` defaults to ~6 months ago.
+--until-date      ISO date — latest snapshot. Defaults to now.
 
---starting-usd N
-    Starting cash per coin (pilot/run only). Default 1000.
+Train-only options
+~~~~~~~~~~~~~~~~~~
+--epochs N        Cap the training grid to the first N epochs per
+                  coin. Default: all viable epochs.
 
---serial
-    Disable Ray; run every fan-out task sequentially. Useful when Ray
-    isn't installed, when debugging a single task, or for deterministic
-    timing. Accepted on train, pilot, run, sweep.
-
-Positional / aggregate-only
-    `aggregate <run_id> --coins X,Y,Z` reads the per-coin series/fills
-    parquets that previous pilot/run/sweep invocations wrote, and
-    produces the hourly + daily portfolio aggregates the Marimo notebook
-    reads. --coins is required and accepts a comma-separated list only
-    (no default-to-all).
+Aggregate-only options
+~~~~~~~~~~~~~~~~~~~~~~
+run_id            Positional, OR pass --run-id. The run whose
+                  fills/series to re-aggregate.
 
 Examples
 --------
-Phase A — train everything, Ray-parallel (≈ 25 min on 24 cores for the
-full universe of 30 coins × ~173 epochs):
+Phase A — train every coin × epoch, Ray-parallel:
     python3 -m backtest.cli train
 
-Phase A subset — train BTC + ETH + SOL only:
-    python3 -m backtest.cli train --coin BTC,ETH,SOL
+Phase B — full-history joint replay reusing Phase A training:
+    python3 -m backtest.cli run --run-id train_20260601_084911
 
-Phase A resume — re-launch with the same run-id; skip-if-done picks up:
-    python3 -m backtest.cli train --run-id train_20260601_081535
+Quick smoke (~6 months, three coins, ~2 min):
+    python3 -m backtest.cli pilot --coin BTC,ETH,SOL
 
-Phase B — default-params replay reusing Phase A training:
-    python3 -m backtest.cli run --run-id train_20260601_081535
+Inline 3-month custom window:
+    python3 -m backtest.cli run --coin BTC,ETH,SOL \\
+        --from-date 2025-12-01 --until-date 2026-03-01
 
-Phase C — 3D sweep reusing Phase A training:
-    python3 -m backtest.cli sweep --coin ETH --run-id train_20260601_081535
+Phase C — 3D sweep reusing Phase A training (27 points × full universe):
+    python3 -m backtest.cli sweep --run-id train_20260601_084911
 
-One-shot pilot for quick validation (2 epochs, single coin, ~25s):
-    python3 -m backtest.cli pilot --coin ETH --epochs 2
+Custom sweep grid (8 points, 3 coins, last 6 months):
+    python3 -m backtest.cli sweep --run-id train_20260601_084911 \\
+        --coin BTC,ETH,SOL --lvls 1,2 --allocs 0.5,2.0 --pms 4.0,8.0 \\
+        --from-date 2025-12-01
 
-One-shot single-coin full replay (does its own training inline):
-    python3 -m backtest.cli run --coin ETH
+Resume an interrupted joint run (same --run-id picks up from the
+last snapshot):
+    python3 -m backtest.cli run --run-id train_20260601_084911
 
-Three coins, full history, into one run_id directory tree:
-    python3 -m backtest.cli run --coin BTC,ETH,SOL
+Re-derive attribution after editing portfolio_aggregate.py:
+    python3 -m backtest.cli aggregate portfolio_20260607_191833
 
-All 30 configured coins, full history:
-    python3 -m backtest.cli run
+Explore in the Marimo notebook:
+    /home/dave/app/anaconda3/envs/dev/bin/marimo edit backtest/portfolio_research.py
 
-Resume an interrupted run by re-issuing the command with --run-id:
-    python3 -m backtest.cli run --coin ETH --run-id pilot_ETH_20260601_072651
+Monitoring a live run
+---------------------
+Every run writes JSONL events to `runs/<run_id>/report.jsonl` plus a
+human-readable `report.txt` summary at end-of-run. Both paths are
+echoed on startup so you can `tail -f` from a second terminal.
 
-Aggregate after a multi-coin run:
-    python3 -m backtest.cli aggregate <run_id> --coins BTC,ETH,SOL
-
-Then explore in the Marimo notebook:
-    /home/dave/app/anaconda3/envs/dev/bin/marimo edit backtest/research.py
+The joint engine writes a per-snapshot heartbeat to its own log and
+a daemon watchdog kills the process if no progress is made for 120s.
 
 Output layout
 -------------
 runs/<run_id>/
-  training/<YYYYMMDD>/<COIN>/training_data.json    # one per 14-day epoch
+  training/<YYYYMMDD>/<COIN>/training_data.json   # one per 14-day epoch
   training/<YYYYMMDD>/<COIN>/trainer_state.json
-  fills/<COIN>.parquet                             # chronological fill log
-  series/<COIN>.parquet                            # per-5min state snapshots
-  checkpoint/<COIN>.pkl                            # resumable per-epoch state
-  agg/<COIN>_hourly.parquet                        # hourly per-coin
-  agg/portfolio_hourly.parquet                     # hourly portfolio sum
-  agg/portfolio_wide_hourly.parquet                # per-coin matrix
-  agg/portfolio_daily.parquet                      # daily + daily_pct_return
-  report.jsonl                                     # live event stream
-  report.txt                                       # human-readable summary
-
-Sweep sub-runs land in sibling directories named
-runs/<run_id>__<COIN>__l<L>_a<A>_p<P>/. The Marimo notebook picks them
-up automatically and renders a (lvl × alloc) heatmap averaged over pm.
-
-Monitoring a live run
----------------------
-`run`, `pilot`, and `sweep` each write a timestamped event log to
-`runs/<run_id>/report.jsonl` as work proceeds, plus a human-readable
-`runs/<run_id>/report.txt` summary at end-of-run. Both paths are echoed
-to the CLI's stdout on startup so you can copy them straight into a
-second terminal.
-
-Event types in report.jsonl
-  run_started     subcommand, coins, params, run_id
-  task_started    coin, pid                     (workers emit via stdout)
-  task_completed  coin + every descriptive field listed below
-  coin_started    (sweep) coin, index, total
-  coin_completed  (sweep) coin, elapsed_s, n_param_points, n_ok, n_error
-  task_error      coin, error
-  run_completed   elapsed_s, n_ok, n_error
-
-task_completed field reference
-  schedule_first_epoch       first 14-day asof in the coin's schedule
-                             (its earliest viable training date)
-  schedule_last_epoch        most recent asof — i.e. now-aligned 14-day grid
-  epochs_total               total number of 14-day epochs in the schedule
-  epochs_replayed_total      lifetime epochs the engine has walked through
-                             (this invocation + every prior resumed one)
-  epochs_replayed_this_run   NEW epochs the engine walked in *this* call
-  epochs_resumed             epochs already on disk from prior runs (these
-                             contributed to epochs_replayed_total but were
-                             not redone here)
-  epochs_trained_this_run    epochs the trainer trained from scratch in
-                             *this* call
-  epochs_skipped_already_done epochs whose training_data.json was reused
-  epochs_failed_this_run     epochs that crashed during training in this call
-  fills_total                lifetime fill count across the coin's history
-  snapshots_total            lifetime hourly snapshot count
-  pct_return_total           total %-return from $1000 starting capital
-                             across the full backtest (positive = profit)
-  wall_seconds_replay        wall-clock time spent inside run_coin in this
-                             call (not including the training phase)
-  resumed_from               date of the checkpoint's last completed epoch,
-                             or null if this was a fresh start
-  replayed_through           date of the most recent bar processed (i.e.
-                             where the run ended for this coin)
-  error                      only on task_error: "ExceptionType: msg"
-
-A nearly-no-op resume (everything already done) looks like:
-  epochs_total = N, epochs_replayed_total = N, epochs_replayed_this_run = 0,
-  epochs_trained_this_run = 0, epochs_skipped_already_done = N,
-  resumed_from = replayed_through = last bar's date
-
-Tail the raw JSONL stream:
-  tail -f backtest/runs/<run_id>/report.jsonl
-
-Tail a single-line summary per event (jq-style with stdlib):
-  tail -f backtest/runs/<run_id>/report.jsonl | python3 -c "
-import sys, json
-for line in sys.stdin:
-    e = json.loads(line)
-    coin = e.get('coin', '')
-    extra = ''
-    if e['event'] == 'task_completed':
-        extra = f\"  elapsed={e['elapsed_s']:.1f}s  fills={e['fills']}  return={e['pct_return']:+.2f}%\"
-    elif e['event'] == 'task_error':
-        extra = f\"  ERROR: {e['error']}\"
-    print(f\"{e['ts']}  {e['event']:<18}  {coin:<5}{extra}\", flush=True)
-"
-
-Per-worker progress beacons (per-epoch timing inside a coin's replay)
-live in the Ray worker logs, NOT in report.jsonl. To watch the slow
-worker(s) in real time:
-
-  tail -f /tmp/ray/session_latest/logs/worker-*.out
-
-Each log line is prefixed with `[worker pid=X coin=Y]` so you can grep
-for one coin's full lifecycle:
-
-  grep "coin=BTC" /tmp/ray/session_latest/logs/worker-*.out
-
-What's currently working (live snapshot of active Ray workers)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-To see exactly which coin each live worker is processing and how far
-it has got — one short line per active worker — paste this into a
-second terminal while a run is in flight:
-
-  for pid in $(pgrep -f "ray::_pilot_worker"); do
-    last=$(grep -h "pid=$pid" /tmp/ray/session_latest/logs/worker-*.out 2>/dev/null | tail -1)
-    cpu=$(ps -p "$pid" -o pcpu= 2>/dev/null | tr -d ' ')
-    printf "pid=%-7s cpu=%5s%%  %s\n" "$pid" "$cpu" "$last"
-  done
-
-Healthy workers print a heartbeat every ~0.85 seconds; a stuck worker
-shows the SAME last-log-line each time you re-run the snippet. A
-worker at 0% CPU with no recent log line is either idle (between
-tasks) or dead.
-
-For a continuous live view (refresh every 2 seconds):
-
-  watch -n 2 'for pid in $(pgrep -f "ray::_pilot_worker"); do
-    last=$(grep -h "pid=$pid" /tmp/ray/session_latest/logs/worker-*.out 2>/dev/null | tail -1)
-    cpu=$(ps -p "$pid" -o pcpu= 2>/dev/null | tr -d " ")
-    printf "pid=%-7s cpu=%5s%%  %s\n" "$pid" "$cpu" "$last"
-  done'
-
-For just the coins (drop pid/cpu, list distinct coins currently
-running):
-
-  for pid in $(pgrep -f "ray::_pilot_worker"); do
-    grep -h "pid=$pid" /tmp/ray/session_latest/logs/worker-*.out 2>/dev/null \
-      | tail -1
-  done | grep -oE "coin=[A-Z]+" | sort -u
-
-If a worker hangs, use the `pid=` field from its last log line to find
-it in `ps aux | grep "ray::_pilot_worker"`, then check that worker's
-.out file for the last completed epoch.
-
-Aggregate progress quickly during a multi-coin run by counting
-checkpoints written (one per completed (coin, epoch) within a coin):
-
-  ls backtest/runs/<run_id>/checkpoint/ | wc -l    # number of coins done
-  ls backtest/runs/<run_id>/training/      | wc -l # number of epoch dirs
-
-Or jump to the final summary the moment the run finishes:
-
-  cat backtest/runs/<run_id>/report.txt
-
-Failure handling
-----------------
-- Each epoch's training is isolated. If pt_trainer crashes on a specific
-  (coin, asof), the CLI prints `FAIL -- <error>` for that epoch and moves
-  on to the next. Per-coin and total trained/skipped/failed counts are
-  reported at the end, followed by a block listing every failed epoch
-  with its error.
-- pt_trainer's failure paths use `sys.exit(1)`. train_one_epoch catches
-  the resulting SystemExit and returns ok=False instead of aborting the
-  whole CLI (Ctrl-C / KeyboardInterrupt still propagates normally).
-- The engine skips epochs whose training_data.json doesn't exist
-  (because training failed). The trader keeps using the previous epoch's
-  training for that 14-day window.
-
-Parallelism
------------
-- `train` and `sweep` fan out over Ray when it's installed. Each Ray
-  worker is its own OS process with its own CWD, so the chdir inside
-  train_one_epoch can't collide between concurrent epochs.
-- The ArcticDB lmdb store is read-only here and supports unlimited
-  concurrent readers across processes.
-- Within a single process, training is serial (Ray runs each task in
-  its own worker).
+  fills.parquet                                   # joint multi-coin fills
+  series.parquet                                  # daily portfolio snapshots
+  portfolio_daily.parquet                         # derived attribution
+  portfolio_checkpoint.pkl                        # resumable engine state
+  report.jsonl                                    # live event stream
+  report.txt                                      # end-of-run summary
 
 Safety
 ------
-- **Do not run two trainers against the same `--run-id` concurrently.**
-  There is no file locking. Two processes writing to the same
-  training_data.json or series parquet will corrupt it. Resume *across*
-  separate sequential invocations is fine — that's serialised by the
-  process boundary plus the skip-if-done check.
-- The runs/ directory is gitignored; nothing under it should be committed.
+- Do not run two writers against the same --run-id concurrently.
+  There is no file locking; concurrent writes corrupt parquet/pickle.
+  Sequential resume across separate invocations is fine.
+- The `runs/` directory is gitignored — nothing under it should be
+  committed.
 - Prod state at /mnt/d/dave/Documents/powertrader/powertrader_demo/state/
   is read-only — never write there from the backtest.
 """
@@ -373,336 +175,413 @@ Safety
 from __future__ import annotations
 
 import argparse
-import sys
 import time
-from typing import List, Optional
+from typing import Optional
 
 import pandas as pd
 
 from pt_pricesource import ArcticPriceSource
 
-from . import workspace as ws
-from .legacy import aggregate as agg
+from . import portfolio_aggregate as pa
 from . import report as rpt
-from .legacy.engine import BacktestParams, CoinRunConfig, run_coin
-from .legacy.sweep import _train_coin_phase, default_grid, run_coin_sweep
-from .train import epoch_schedule, train_grid, train_one_epoch
+from . import workspace as ws
+from .portfolio_engine import (
+    PortfolioParams, PortfolioRunConfig, run_portfolio,
+)
+from .train import train_grid
 
 
 def _resolve_coins(arg_value: Optional[str]) -> list[str]:
     """Parse --coin: comma-separated list, or all configured coins if blank."""
     if arg_value:
         return [c.strip().upper() for c in arg_value.split(",") if c.strip()]
-    # Default to pt_config.json coin universe
     import pt_trader  # triggers config load
     return [c.upper() for c in pt_trader.crypto_symbols]
 
 
-def cmd_pilot(args):
+def _parse_iso_date(s: Optional[str]) -> Optional[pd.Timestamp]:
+    if not s:
+        return None
+    ts = pd.Timestamp(s)
+    if ts.tz is None:
+        ts = ts.tz_localize("UTC")
+    return ts
+
+
+def _utcnow() -> pd.Timestamp:
+    ts = pd.Timestamp.utcnow()
+    return ts if ts.tz is not None else ts.tz_localize("UTC")
+
+
+# ---------------------------------------------------------------------------
+# Joint replay (run + pilot share this driver)
+# ---------------------------------------------------------------------------
+
+def _cmd_portfolio(args, default_from: Optional[pd.Timestamp]) -> None:
+    """Shared driver for `run` and `pilot`. `pilot` differs only in the
+    `default_from` it passes — `run` lets the engine pick each coin's
+    earliest viable date."""
     coins = _resolve_coins(args.coin)
     if not coins:
         print("no coins to run")
         return
 
-    if len(coins) == 1:
-        _cmd_pilot_one(args)
+    run_id = args.run_id
+    training_run_id = args.training_run_id or run_id
+    if not (ws.run_dir(training_run_id) / "training").exists():
+        print(f"training-run-id {training_run_id}: runs/{training_run_id}/training/ "
+              "not found. Run `backtest train` first (or pass an existing one).")
         return
+    if args.training_run_id and args.training_run_id != run_id:
+        print(f"training source: runs/{training_run_id}/training/  "
+              f"(outputs land in runs/{run_id}/)")
 
-    # Multi-coin: each coin is an independent path-dependent backtest.
-    # Fan out across coins via Ray when available. Within a coin, replay
-    # stays internally sequential (path-dependent across epochs).
-    serial = bool(getattr(args, "serial", False))
-    run_id = args.run_id or ws.new_run_id(prefix="pilot")
-    print(f"running {len(coins)} coins: {', '.join(coins)}"
-          f"   (run_id = {run_id}{'  resuming' if args.run_id else ''})")
+    until = _parse_iso_date(args.until_date) or _utcnow()
+    from_date = _parse_iso_date(args.from_date) or default_from
+    resuming = (ws.run_dir(run_id) / "portfolio_checkpoint.pkl").exists()
+
+    print(f"run_id = {run_id}{'  (resuming)' if resuming else ''}")
+    print(f"coins ({len(coins)}): {', '.join(coins)}")
+    print(f"window: "
+          f"{from_date.strftime('%Y-%m-%d') if from_date else '<earliest viable per coin>'}"
+          f" → {until.strftime('%Y-%m-%d')}")
+    print(f"starting: ${args.starting_usd:,.0f}  "
+          f"params: lvl{args.lvl} a{args.alloc} p{args.pm}")
     print(f"report: backtest/runs/{run_id}/report.jsonl  (tail -f to monitor)")
-    cfg_dict = {
-        "run_id": run_id,
-        "lvl": args.lvl,
-        "alloc": float(args.alloc),
-        "pm": float(args.pm),
-        "starting_usd": float(args.starting_usd),
-        "epochs": args.epochs,
-    }
 
     rpt.event(
         run_id, "run_started",
-        subcommand=("run" if args.epochs is None else "pilot"),
+        subcommand="run" if default_from is None else "pilot",
         coins=coins,
         params={"lvl": args.lvl, "alloc": float(args.alloc),
                 "pm": float(args.pm), "starting_usd": float(args.starting_usd),
-                "epochs": args.epochs},
+                "from_date": str(from_date) if from_date else None,
+                "until_date": str(until)},
     )
-    _run_t0 = time.monotonic()
+    t0 = time.monotonic()
 
-    if not serial:
-        try:
-            import ray  # type: ignore
-        except ImportError:
-            print("[cmd_pilot] Ray not installed — falling back to serial")
-            serial = True
-
-    results: list[dict] = []
-    if serial:
-        for c in coins:
-            print(f"\n── {c} ──")
-            args.coin = c
-            args.run_id = run_id
-            _cmd_pilot_one(args)
-            # Serial path doesn't return a structured dict; emit a
-            # placeholder completion event with what we know.
-            rpt.event(run_id, "task_completed_serial", coin=c)
-    else:
-        import ray  # type: ignore
-        if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True, log_to_driver=False)
-        remote = ray.remote(_pilot_worker)
-        futures = [remote.remote(c, cfg_dict) for c in coins]
-        # Collect results as they finish so the JSONL stays live during
-        # the run (tail -f will see completions arrive in real time).
-        pending = list(futures)
-        while pending:
-            done, pending = ray.wait(pending, num_returns=1)
-            try:
-                r = ray.get(done[0])
-            except Exception as e:
-                rpt.event(run_id, "task_error",
-                          coin="?", error=f"{type(e).__name__}: {e}")
-                continue
-            results.append(r)
-            if r.get("error"):
-                rpt.event(run_id, "task_error",
-                          coin=r["coin"], error=r["error"])
-            else:
-                # Forward every descriptive field from _pilot_worker.
-                # Keeping a single forwarding loop avoids missing fields
-                # when new ones are added in the worker.
-                event_payload = {k: v for k, v in r.items() if k != "error"}
-                rpt.event(run_id, "task_completed", **event_payload)
-
-    n_ok = sum(1 for r in results if not r.get("error"))
-    n_err = len(results) - n_ok
-    rpt.event(run_id, "run_completed",
-              elapsed_s=time.monotonic() - _run_t0,
-              n_ok=n_ok, n_error=n_err)
-    rpt.write_summary_text(run_id)
-
-    print("\n=== per-coin summary ===")
-    for r in results:
-        if r.get("error"):
-            print(f"  {r['coin']:<5}  ERROR: {r['error']}")
-        else:
-            print(
-                f"  {r['coin']:<5}  "
-                f"epochs total={r['epochs_total']:>3}  "
-                f"replayed total={r['epochs_replayed_total']:>3}  "
-                f"this-run replay={r['epochs_replayed_this_run']:>3}  "
-                f"trained={r['epochs_trained_this_run']:>3}  "
-                f"fills={r['fills_total']:>4}  "
-                f"return={r['pct_return_total']:+.2f}%"
-            )
-    print(f"\nreport: backtest/runs/{run_id}/report.txt")
-
-
-def _pilot_worker(coin: str, cfg: dict) -> dict:
-    """Top-level picklable worker for one coin. Returns a small summary dict.
-
-    Each Ray worker is its own process. The pt_trader globals it mutates
-    here are local to the worker.
-    """
-    import time as _time
-    import pandas as _pd
-    import pt_trader as _pt
-    from .train import epoch_schedule as _epoch_schedule
-    from .train import train_one_epoch as _train_one_epoch
-    from .legacy.engine import (
-        BacktestParams as _BP, CoinRunConfig as _Cfg, run_coin as _run_coin,
-    )
-
-    import os as _os
-    pid = _os.getpid()
-    tag = f"[worker pid={pid} coin={coin.upper()}]"
-    # All log lines flushed immediately so Ray's per-worker .out captures
-    # them even if the worker hangs later — essential for diagnosing the
-    # "which coin is that stuck PID running?" case.
-    def _log(msg: str) -> None:
-        print(f"{tag} {msg}", flush=True)
-
-    _log("starting")
-    out = {"coin": coin.upper(), "error": None}
-    try:
-        _pt.TRADE_START_LEVEL = int(cfg["lvl"])
-        _pt.START_ALLOC_PCT = float(cfg["alloc"])
-        _pt.PM_START_PCT_NO_DCA = float(cfg["pm"])
-        _pt.PM_START_PCT_WITH_DCA = float(cfg["pm"])
-        _pt.crypto_symbols = [coin.upper()]
-        _pt.LONG_TERM_SYMBOLS = set()
-        _pt.EXCLUDED_COINS = set()
-
-        src = ArcticPriceSource()
-        now_utc = _pd.Timestamp.utcnow()
-        if now_utc.tz is None:
-            now_utc = now_utc.tz_localize("UTC")
-        sched = list(_epoch_schedule(coin, now_utc, src))
-        if cfg.get("epochs"):
-            sched = sched[: cfg["epochs"]]
-        _log(f"schedule resolved: {len(sched)} epochs")
-        if not sched:
-            out["error"] = "no viable epochs"
-            _log("EXIT no_viable_epochs")
-            return out
-
-        _log(f"training phase begin: {sched[0].date()} → {sched[-1].date()}")
-        train_t0 = _time.monotonic()
-        n_skip = n_fail = 0
-        for asof in sched:
-            ed = ws.training_epoch_dir(cfg["run_id"], asof.timestamp(), coin)
-            existed = (ed / "training_data.json").exists()
-            r = _train_one_epoch(cfg["run_id"], coin, asof.timestamp())
-            if existed and r.ok:
-                n_skip += 1
-            elif not r.ok:
-                n_fail += 1
-        # Descriptive event-payload fields.
-        out["epochs_trained_this_run"] = len(sched) - n_skip - n_fail
-        out["epochs_skipped_already_done"] = n_skip
-        out["epochs_failed_this_run"] = n_fail
-        out["epochs_total"] = len(sched)
-        out["schedule_first_epoch"] = sched[0].strftime("%Y-%m-%d")
-        out["schedule_last_epoch"] = sched[-1].strftime("%Y-%m-%d")
-        _log(f"training phase done in {_time.monotonic()-train_t0:.1f}s "
-             f"(trained={out['epochs_trained_this_run']} "
-             f"skipped={n_skip} failed={n_fail})")
-
-        until = (
-            min(sched[-1] + _pd.Timedelta(days=14), now_utc)
-            if cfg.get("epochs") else None
-        )
-        rc = _Cfg(
-            coin=coin.upper(),
-            starting_usd=float(cfg["starting_usd"]),
-            until=until,
-            record_every_n=12,
-            params=_BP(
-                trade_start_level=int(cfg["lvl"]),
-                start_allocation_pct=float(cfg["alloc"]),
-                pm_start_pct=float(cfg["pm"]),
-            ),
-        )
-        _log(f"replay phase begin: {len(sched)} epoch(s)")
-        engine_t0 = _time.monotonic()
-        res = _run_coin(cfg["run_id"], rc, epoch_schedule=sched, price_source=src)
-        out["wall_seconds_replay"] = _time.monotonic() - engine_t0
-        out["epochs_replayed_this_run"] = res.epochs_used
-        out["epochs_replayed_total"] = res.epochs_used + res.epochs_resumed
-        out["epochs_resumed"] = res.epochs_resumed
-        out["fills_total"] = len(res.fills)
-        out["snapshots_total"] = len(res.series)
-        out["replayed_through"] = res.replayed_through
-        out["resumed_from"] = res.resumed_from
-        if res.series is not None and len(res.series):
-            first = float(res.series.iloc[0]["total_account_value"])
-            last = float(res.series.iloc[-1]["total_account_value"])
-            out["pct_return_total"] = (last / first - 1.0) * 100.0 if first else 0.0
-        else:
-            out["pct_return_total"] = 0.0
-        _log(f"EXIT ok  replay_elapsed={out['wall_seconds_replay']:.1f}s  "
-             f"epochs_replayed_this_run={out['epochs_replayed_this_run']}  "
-             f"fills_total={out['fills_total']}  "
-             f"return={out['pct_return_total']:+.2f}%")
-        return out
-    except Exception as e:
-        out["error"] = f"{type(e).__name__}: {e}"
-        _log(f"EXIT error  {out['error']}")
-        return out
-
-
-def _cmd_pilot_one(args):
-    coin = args.coin.upper()
-    src = ArcticPriceSource()
-    run_id = args.run_id or ws.new_run_id(prefix=f"pilot_{coin}")
-    print(f"[{coin}] run_id = {run_id}{'  (resuming)' if args.run_id else ''}")
-
-    now_utc = pd.Timestamp.utcnow()
-    if now_utc.tz is None:
-        now_utc = now_utc.tz_localize("UTC")
-    sched = list(epoch_schedule(coin, now_utc, src))
-    if args.epochs:
-        sched = sched[: args.epochs]
-    if not sched:
-        print(f"no viable epochs for {coin} (need 100 weekly bars)")
-        return
-
-    print(f"training {len(sched)} epochs: {sched[0].date()} → {sched[-1].date()}")
-    t0 = time.time()
-    results = []
-    n_skipped = 0
-    for i, asof in enumerate(sched, 1):
-        epoch_dir = ws.training_epoch_dir(run_id, asof.timestamp(), coin)
-        was_done = (epoch_dir / "training_data.json").exists()
-        res = train_one_epoch(run_id, coin, asof.timestamp())
-        results.append(res)
-        if was_done and res.ok:
-            n_skipped += 1
-        status = "skip" if (was_done and res.ok) else ("ok" if res.ok else "FAIL")
-        print(f"  [{i}/{len(sched)}] {asof.date()}  {status}"
-              + (f"  -- {res.error}" if not res.ok else ""))
-    n_failed = sum(1 for r in results if not r.ok)
-    n_trained = len(results) - n_skipped - n_failed
-    print(f"training elapsed: {time.time()-t0:.1f}s  "
-          f"({n_trained} trained, {n_skipped} skipped, {n_failed} failed)")
-    if n_failed:
-        print(f"\n=== {n_failed} epoch(s) failed ===")
-        for r in results:
-            if not r.ok:
-                print(f"  {r.asof.date()}  {r.error}")
-
-    # Bound `until` to the end of the last requested epoch so pilots stay short.
-    if args.epochs:
-        epoch_end = sched[-1] + pd.Timedelta(days=14)
-        until = min(epoch_end, now_utc)
-    else:
-        until = None
-
-    cfg = CoinRunConfig(
-        coin=coin,
-        starting_usd=args.starting_usd,
+    cfg = PortfolioRunConfig(
+        coins=coins,
+        starting_usd=float(args.starting_usd),
         until=until,
-        record_every_n=12,
-        params=BacktestParams(
-            trade_start_level=args.lvl,
+        from_date=from_date,
+        snapshot_every_n=288,   # daily
+        params=PortfolioParams(
+            trade_start_level=int(args.lvl),
             start_allocation_pct=float(args.alloc),
             pm_start_pct=float(args.pm),
         ),
+        training_run_id=(args.training_run_id or None),
     )
 
-    print(f"running engine across {len(sched)} epochs ({len(sched)*14} days)...")
-    t0 = time.time()
-    out = run_coin(run_id, cfg, epoch_schedule=sched, price_source=src)
-    print(f"engine elapsed: {time.time()-t0:.1f}s")
-    print(f"epochs_used={out.epochs_used}, fills={len(out.fills)}, snapshots={len(out.series)}")
+    try:
+        if getattr(args, "profile", False):
+            import cProfile, pstats, io as _io
+            prof_path = ws.run_dir(run_id) / "engine.prof"
+            ws.ensure_dir(ws.run_dir(run_id))
+            pr = cProfile.Profile()
+            pr.enable()
+            try:
+                res = run_portfolio(run_id, cfg)
+            finally:
+                pr.disable()
+                pr.dump_stats(str(prof_path))
+                buf = _io.StringIO()
+                pstats.Stats(pr, stream=buf).sort_stats("cumulative").print_stats(40)
+                (ws.run_dir(run_id) / "engine.prof.top40.txt").write_text(buf.getvalue())
+                print(f"profile -> {prof_path}")
+                print(f"         {ws.run_dir(run_id) / 'engine.prof.top40.txt'}")
+        else:
+            res = run_portfolio(run_id, cfg)
+    except Exception as e:
+        rpt.event(run_id, "run_failed", error=f"{type(e).__name__}: {e}")
+        raise
 
-    hourly = agg.write_per_coin_hourly(run_id, coin)
-    if hourly is not None and not hourly.empty:
-        first, last = hourly.iloc[0], hourly.iloc[-1]
-        print(
-            f"\nAccount: ${first['total_account_value']:.2f} → ${last['total_account_value']:.2f}  "
-            f"({last['pct_return']:+.2f}%)"
+    rpt.event(
+        run_id, "run_engine_done",
+        elapsed_s=time.monotonic() - t0,
+        coins_active=res.coins_active,
+        coins_skipped=res.coins_skipped,
+        bars_processed=res.bars_processed,
+        bars_resumed=res.bars_resumed,
+        fills=len(res.fills),
+        snapshots=len(res.series),
+    )
+
+    print("\naggregating ...")
+    daily = pa.write_portfolio_daily(run_id)
+    if daily is not None and not daily.empty:
+        start_v = float(daily["total_account_value"].iloc[0])
+        last_v = float(daily["total_account_value"].iloc[-1])
+        ret = (last_v / start_v - 1.0) * 100.0 if start_v else 0.0
+        resid = pa.attribution_residual(daily).abs().max()
+        print(f"final ${last_v:,.2f}  return={ret:+.2f}%  "
+              f"attribution_residual={resid:.2e}%")
+        rpt.event(
+            run_id, "run_completed",
+            elapsed_s=time.monotonic() - t0,
+            final_total_account_value=last_v,
+            pct_return_compound=ret,
+            attribution_residual=float(resid),
         )
+    else:
+        rpt.event(run_id, "run_completed",
+                  elapsed_s=time.monotonic() - t0,
+                  note="no daily produced (no snapshots)")
 
 
 def cmd_run(args):
-    args.epochs = None
-    cmd_pilot(args)
+    """Full joint backtest — every coin from its earliest_viable_asof."""
+    _cmd_portfolio(args, default_from=None)
 
+
+def cmd_pilot(args):
+    """Joint backtest defaulting to the last ~6 months for fast iteration."""
+    _cmd_portfolio(args, default_from=_utcnow() - pd.Timedelta(days=180))
+
+
+# ---------------------------------------------------------------------------
+# Joint sweep over (lvl, alloc, pm)
+# ---------------------------------------------------------------------------
+
+# Each sweep task is one full joint backtest at fixed params. Tasks are
+# independent (different sub-run dirs) but share the training tree of the
+# parent run_id. Ray-parallel by default.
+
+_DEFAULT_LVLS = [1, 2, 3]
+_DEFAULT_ALLOCS = [0.5, 1.0, 2.0]
+_DEFAULT_PMS = [2.0, 4.0, 6.0]
+
+
+def _parse_csv_floats(s: Optional[str], default: list) -> list[float]:
+    if not s:
+        return [float(x) for x in default]
+    return [float(x.strip()) for x in s.split(",") if x.strip()]
+
+
+def _parse_csv_ints(s: Optional[str], default: list) -> list[int]:
+    if not s:
+        return [int(x) for x in default]
+    return [int(x.strip()) for x in s.split(",") if x.strip()]
+
+
+def _sweep_sub_run_id(parent: str, lvl: int, alloc: float, pm: float) -> str:
+    # Nested under the parent so the sweep is one tidy subtree on disk:
+    # runs/<parent>/sweep/l<L>_a<A>_p<P>/. ws.run_dir resolves the
+    # forward slash to a real path component.
+    return f"{parent}/sweep/l{lvl}_a{alloc}_p{pm}"
+
+
+def _sweep_worker(
+    parent_run_id: str,
+    coins: list[str],
+    starting_usd: float,
+    until_iso: Optional[str],
+    from_iso: Optional[str],
+    lvl: int,
+    alloc: float,
+    pm: float,
+) -> dict:
+    """One sweep task: full joint backtest at fixed params + aggregation.
+
+    Args are plain Python types (str / float / list) so Ray can pickle
+    them cleanly. Returns a metrics dict that becomes one row of
+    sweep_results.parquet.
+    """
+    from . import portfolio_aggregate as pa_inner
+    from .portfolio_engine import (
+        PortfolioParams as PP,
+        PortfolioRunConfig as PRC,
+        run_portfolio as rp,
+    )
+
+    until = pd.Timestamp(until_iso) if until_iso else None
+    if until is not None and until.tz is None:
+        until = until.tz_localize("UTC")
+    from_date = pd.Timestamp(from_iso) if from_iso else None
+    if from_date is not None and from_date.tz is None:
+        from_date = from_date.tz_localize("UTC")
+
+    sub_run_id = _sweep_sub_run_id(parent_run_id, lvl, alloc, pm)
+
+    cfg = PRC(
+        coins=list(coins),
+        starting_usd=float(starting_usd),
+        until=until,
+        from_date=from_date,
+        snapshot_every_n=288,
+        params=PP(
+            trade_start_level=int(lvl),
+            start_allocation_pct=float(alloc),
+            pm_start_pct=float(pm),
+        ),
+        training_run_id=parent_run_id,
+    )
+
+    out = {
+        "lvl": int(lvl),
+        "alloc": float(alloc),
+        "pm": float(pm),
+        "sub_run_id": sub_run_id,
+        "starting_value": float(starting_usd),
+        "final_value": float("nan"),
+        "pct_return": float("nan"),
+        "n_fills": 0,
+        "n_snapshots": 0,
+        "coins_active": 0,
+        "coins_skipped": 0,
+        "error": None,
+    }
+    try:
+        res = rp(sub_run_id, cfg)
+        out["n_fills"] = int(len(res.fills))
+        out["n_snapshots"] = int(len(res.series))
+        out["coins_active"] = int(len(res.coins_active))
+        out["coins_skipped"] = int(len(res.coins_skipped))
+        if res.error:
+            out["error"] = res.error
+            return out
+        daily = pa_inner.write_portfolio_daily(sub_run_id)
+        if daily is not None and not daily.empty:
+            start_v = float(daily["total_account_value"].iloc[0])
+            last_v = float(daily["total_account_value"].iloc[-1])
+            out["starting_value"] = start_v
+            out["final_value"] = last_v
+            out["pct_return"] = ((last_v / start_v) - 1.0) * 100.0 if start_v else 0.0
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+    return out
+
+
+def cmd_sweep(args):
+    """Joint sweep over (lvl, alloc, pm). Requires --run-id of a prior
+    `train` run; each param point becomes a sub-run sharing that training
+    tree. Ray-parallel by default."""
+    parent_run_id = args.run_id
+    if not parent_run_id:
+        print("sweep: --run-id is required and must point at a `train` run "
+              "whose training_data.json artifacts will be shared across all "
+              "sweep sub-runs. Run `backtest train` first.")
+        return
+
+    parent_dir = ws.run_dir(parent_run_id)
+    if not (parent_dir / "training").exists():
+        print(f"sweep: runs/{parent_run_id}/training/ not found — "
+              "is this a real train run_id?")
+        return
+
+    coins = _resolve_coins(args.coin)
+    if not coins:
+        print("sweep: no coins")
+        return
+
+    lvls = _parse_csv_ints(args.lvls, _DEFAULT_LVLS)
+    allocs = _parse_csv_floats(args.allocs, _DEFAULT_ALLOCS)
+    pms = _parse_csv_floats(args.pms, _DEFAULT_PMS)
+    grid: list[tuple[int, float, float]] = [
+        (lvl, alloc, pm) for lvl in lvls for alloc in allocs for pm in pms
+    ]
+
+    until = _parse_iso_date(args.until_date) or _utcnow()
+    from_date = _parse_iso_date(args.from_date)
+    until_iso = until.isoformat() if until is not None else None
+    from_iso = from_date.isoformat() if from_date is not None else None
+
+    print(f"sweep parent run_id = {parent_run_id}")
+    print(f"coins ({len(coins)}): {', '.join(coins)}")
+    print(f"grid: {len(lvls)} lvls × {len(allocs)} allocs × {len(pms)} pms = "
+          f"{len(grid)} points  ({'parallel' if not args.serial else 'serial'})")
+    print(f"window: "
+          f"{from_date.strftime('%Y-%m-%d') if from_date else '<earliest viable>'}"
+          f" → {until.strftime('%Y-%m-%d')}")
+    print(f"starting: ${args.starting_usd:,.0f}")
+    print(f"report: backtest/runs/{parent_run_id}/report.jsonl")
+
+    rpt.event(
+        parent_run_id, "run_started",
+        subcommand="sweep",
+        coins=coins,
+        params={"grid_size": len(grid),
+                "lvls": lvls, "allocs": allocs, "pms": pms,
+                "starting_usd": float(args.starting_usd),
+                "from_date": str(from_date) if from_date else None,
+                "until_date": str(until),
+                "serial": bool(args.serial)},
+    )
+    t0 = time.monotonic()
+
+    use_ray = not args.serial
+    if use_ray:
+        try:
+            import ray  # type: ignore
+        except ImportError:
+            print("[sweep] Ray not installed — falling back to serial")
+            use_ray = False
+
+    if use_ray:
+        import ray  # type: ignore
+        if not ray.is_initialized():
+            ray.init(ignore_reinit_error=True, log_to_driver=False)
+        remote = ray.remote(_sweep_worker)
+        futures = [
+            remote.remote(parent_run_id, coins, float(args.starting_usd),
+                          until_iso, from_iso, lvl, alloc, pm)
+            for (lvl, alloc, pm) in grid
+        ]
+        results = ray.get(futures)
+    else:
+        results = [
+            _sweep_worker(parent_run_id, coins, float(args.starting_usd),
+                          until_iso, from_iso, lvl, alloc, pm)
+            for (lvl, alloc, pm) in grid
+        ]
+
+    # Headline rollup (one row per param point)
+    res_df = pd.DataFrame(results)
+    rollup_path = parent_dir / "sweep_results.parquet"
+    res_df.to_parquet(rollup_path)
+
+    # Long-format daily timeseries across every param point
+    sweep_daily = pa.write_sweep_daily(parent_run_id)
+    elapsed = time.monotonic() - t0
+
+    n_ok = int(res_df["error"].isna().sum())
+    n_err = int(len(res_df) - n_ok)
+    print(f"\ncompleted {len(res_df)} sweep tasks in {elapsed:.1f}s  "
+          f"({n_ok} ok, {n_err} errors)")
+    if n_ok:
+        ok = res_df[res_df["error"].isna()].sort_values("pct_return", ascending=False)
+        print(f"\ntop 5 by pct_return:")
+        for _, row in ok.head(5).iterrows():
+            print(f"  lvl{int(row['lvl'])} a{row['alloc']} p{row['pm']:<4}  "
+                  f"return={row['pct_return']:+.2f}%  "
+                  f"final=${row['final_value']:,.0f}  "
+                  f"fills={int(row['n_fills'])}")
+    if n_err:
+        print(f"\nerrors ({n_err}):")
+        for _, row in res_df[res_df["error"].notna()].head(5).iterrows():
+            print(f"  lvl{int(row['lvl'])} a{row['alloc']} p{row['pm']}: "
+                  f"{row['error']}")
+
+    rpt.event(parent_run_id, "run_completed",
+              elapsed_s=elapsed, n_ok=n_ok, n_err=n_err,
+              rollup_path=str(rollup_path))
+    print(f"\nsweep_results.parquet  -> {rollup_path}  ({len(res_df)} rows)")
+    if sweep_daily is not None:
+        print(f"sweep_daily.parquet    -> {parent_dir / 'sweep_daily.parquet'}  "
+              f"({len(sweep_daily):,} rows)")
+    else:
+        print("sweep_daily.parquet    -> (skipped — no sub-run produced a daily series)")
+
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
 
 def cmd_train(args):
-    """Train-only phase: produce training_data.json for every (coin × epoch).
-
-    Independent across (coin, asof) tuples, so Ray-parallelizes cleanly.
-    Subsequent `run` / `sweep` invocations with the same --run-id will
-    pick up the cached training data via the skip-if-done logic.
-    """
+    """Produce training_data.json for every (coin × epoch). Ray-parallel
+    across the full grid by default. Subsequent `run` invocations with
+    the same --run-id reuse this output via skip-if-done."""
     coins = _resolve_coins(args.coin)
     if not coins:
         print("no coins to train")
@@ -713,25 +592,20 @@ def cmd_train(args):
     print(f"run_id = {run_id}{'  (resuming)' if args.run_id else ''}")
     print(f"coins ({len(coins)}): {', '.join(coins)}")
 
-    now_utc = pd.Timestamp.utcnow()
-    if now_utc.tz is None:
-        now_utc = now_utc.tz_localize("UTC")
-
     t0 = time.time()
     by_coin = train_grid(
         run_id=run_id,
         coins=coins,
-        until=now_utc,
+        until=_utcnow(),
         parallel=not args.serial,
         epochs_per_coin=args.epochs,
         price_source=src,
     )
     elapsed = time.time() - t0
 
-    # Per-coin summary
     print(f"\nFinished in {elapsed:.1f}s "
           f"({'serial' if args.serial else 'Ray-parallel'})")
-    failed_rows: list[tuple[str, str, str]] = []  # (coin, asof, error)
+    failed_rows: list[tuple[str, str, str]] = []
     grand_trained = grand_skipped = grand_failed = 0
     for coin, results in by_coin.items():
         n_skip = sum(1 for r in results if r.skipped)
@@ -756,186 +630,142 @@ def cmd_train(args):
             print(f"  {coin}  {asof_str}  {err}")
 
 
-def cmd_sweep(args):
-    coins = _resolve_coins(args.coin)
-    if not coins:
-        print("no coins to sweep")
-        return
-
-    # Run-id naming: include coin if just one, otherwise generic
-    if len(coins) == 1:
-        run_id = ws.new_run_id(prefix=f"sweep_{coins[0]}")
-    else:
-        run_id = ws.new_run_id(prefix="sweep")
-    print(f"sweep run_id = {run_id}")
-    print(f"report: backtest/runs/{run_id}/report.jsonl  (tail -f to monitor)")
-
-    until = pd.Timestamp.utcnow()
-    if until.tz is None:
-        until = until.tz_localize("UTC")
-    grid = default_grid()
-    total_tasks = len(grid) * len(coins)
-    print(f"grid size: {len(grid)} param points × {len(coins)} coin(s) = "
-          f"{total_tasks} backtests  "
-          f"({'parallel' if not args.serial else 'serial'})")
-    print(f"coins: {', '.join(coins)}")
-
-    rpt.event(
-        run_id, "run_started",
-        subcommand="sweep",
-        coins=coins,
-        params={"grid_size": len(grid), "total_tasks": total_tasks,
-                "serial": bool(args.serial)},
-    )
-    _sweep_t0 = time.monotonic()
-
-    # Each coin's sweep is internally Ray-parallel across its 350 param
-    # points. Per-coin training (param-independent) happens once before
-    # that coin's fan-out. Multiple coins are dispatched sequentially —
-    # one coin's Ray cluster cycle at a time — to keep memory pressure
-    # bounded.
-    all_results = []
-    for ci, coin in enumerate(coins, 1):
-        print(f"\n── sweep [{ci}/{len(coins)}] {coin} ──")
-        _coin_t0 = time.monotonic()
-        rpt.event(run_id, "coin_started", coin=coin, index=ci, total=len(coins))
-        rs = run_coin_sweep(
-            run_id, coin, until=until, grid=grid, parallel=not args.serial,
-        )
-        all_results.extend(rs)
-        n_ok = sum(1 for r in rs if not r.error)
-        n_err = sum(1 for r in rs if r.error)
-        rpt.event(
-            run_id, "coin_completed",
-            coin=coin, elapsed_s=time.monotonic() - _coin_t0,
-            n_param_points=len(rs), n_ok=n_ok, n_error=n_err,
-            avg_fills=(sum(r.rows_fills for r in rs if not r.error)
-                       / max(n_ok, 1)),
-        )
-        for r in rs:
-            if r.error:
-                rpt.event(run_id, "task_error",
-                          coin=r.coin, params=str(r.params), error=r.error)
-
-    n_ok = sum(1 for r in all_results if not r.error)
-    n_err = sum(1 for r in all_results if r.error)
-    rpt.event(run_id, "run_completed",
-              elapsed_s=time.time() - _sweep_t0,
-              n_ok=n_ok, n_error=n_err)
-    rpt.write_summary_text(run_id)
-
-    print(f"\ncompleted {len(all_results)} tasks across {len(coins)} coin(s)")
-    errors = [r for r in all_results if r.error]
-    ok = [r for r in all_results if not r.error]
-    if errors:
-        print(f"errors: {len(errors)}")
-        for e in errors[:5]:
-            print(f"  {e.coin} {e.params}: {e.error}")
-    print(f"ok: {len(ok)}; avg fills/run: "
-          f"{sum(r.rows_fills for r in ok)/max(len(ok),1):.1f}")
-    print(f"\nreport: backtest/runs/{run_id}/report.txt")
-
+# ---------------------------------------------------------------------------
+# Aggregate (re-derive)
+# ---------------------------------------------------------------------------
 
 def cmd_aggregate(args):
-    # Accept run_id from either the positional or the --run-id form.
+    """Re-derive portfolio_daily.parquet from an existing joint run."""
     run_id = args.run_id_pos or args.run_id_kwarg
     if not run_id:
         print("aggregate: run_id required "
               "(positional 'run_id' or --run-id <id>)")
         return
 
-    # Accept the coin list from --coin (preferred), --coins (legacy alias),
-    # or default to every coin in pt_config.json — same shape as the
-    # other subcommands.
-    coin_arg = args.coin if args.coin is not None else args.coins_legacy
-    coins = _resolve_coins(coin_arg)
-    if not coins:
-        print(f"aggregate: no coins resolved (coin_arg={coin_arg!r})")
+    print(f"aggregating run_id={run_id}")
+    daily = pa.write_portfolio_daily(run_id)
+    if daily is None:
+        print(f"no series.parquet at runs/{run_id}/ — "
+              "nothing to aggregate (was this run produced by the "
+              "joint engine?)")
         return
+    if daily.empty:
+        print("series.parquet present but empty")
+        return
+    resid = pa.attribution_residual(daily).abs().max()
+    print(f"portfolio_daily rows: {len(daily)}  "
+          f"max attribution residual: {resid:.2e}%")
 
-    print(f"aggregating run_id={run_id}, coins=({len(coins)}) {', '.join(coins)}")
-    portfolio = agg.portfolio_hourly(run_id, coins)
-    daily = agg.portfolio_daily(run_id, portfolio)
-    print(f"portfolio_hourly rows: {len(portfolio)}, daily rows: {len(daily)}")
+
+# ---------------------------------------------------------------------------
+# CLI wiring
+# ---------------------------------------------------------------------------
+
+def _add_replay_args(sp: argparse.ArgumentParser) -> None:
+    """Args shared by `run` and `pilot`."""
+    sp.add_argument("--coin", default=None,
+                    help="Coin symbol, comma-separated list, "
+                         "or omit for all pt_config.json coins")
+    sp.add_argument("--lvl", type=int, default=2,
+                    help="trade_start_level (default 2)")
+    sp.add_argument("--alloc", type=float, default=1.0,
+                    help="start_allocation_pct (default 1.0)")
+    sp.add_argument("--pm", type=float, default=4.0,
+                    help="pm_start_pct (default 4.0)")
+    sp.add_argument("--starting-usd", type=float, default=10000.0,
+                    help="Joint wallet starting cash (default 10000)")
+    sp.add_argument("--from-date", default=None,
+                    help="Earliest snapshot, ISO YYYY-MM-DD "
+                         "(default: pilot=~6mo ago, run=earliest viable)")
+    sp.add_argument("--until-date", default=None,
+                    help="Latest snapshot, ISO YYYY-MM-DD (default: now)")
+    sp.add_argument("--run-id", required=True,
+                    help="Train run_id whose training tree to reuse, and "
+                         "where replay outputs land. Re-issuing the same "
+                         "id on a later run resumes from the checkpoint.")
+    sp.add_argument("--training-run-id", default=None,
+                    help="Optional override: read training_data.json from "
+                         "this run_id's training/ tree instead of --run-id's. "
+                         "Lets a side experiment (profile, sweep sub-run) "
+                         "write its own outputs without touching another "
+                         "in-flight run's checkpoint.")
+    sp.add_argument("--profile", action="store_true",
+                    help="Wrap run_portfolio() in cProfile; dump "
+                         "engine.prof + engine.prof.top40.txt into the run dir.")
 
 
 def main():
     p = argparse.ArgumentParser(prog="backtest")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    pilot = sub.add_parser("pilot", help="Small validation run")
-    pilot.add_argument("--coin", default=None,
-                       help="Coin symbol, comma-separated list, "
-                            "or omit for all pt_config.json coins")
-    pilot.add_argument("--epochs", type=int, default=2)
-    pilot.add_argument("--lvl", type=int, default=2)
-    pilot.add_argument("--alloc", type=float, default=1.0)
-    pilot.add_argument("--pm", type=float, default=4.0)
-    pilot.add_argument("--starting-usd", type=float, default=1000.0)
-    pilot.add_argument("--run-id", default=None,
-                       help="Existing run_id to resume (default: new timestamped)")
-    pilot.add_argument("--serial", action="store_true",
-                       help="Disable Ray; run coins sequentially")
+    pilot = sub.add_parser(
+        "pilot",
+        help="Joint backtest, last ~6 months by default — minutes of compute",
+    )
+    _add_replay_args(pilot)
     pilot.set_defaults(func=cmd_pilot)
 
-    run = sub.add_parser("run", help="Full single-coin run, default params")
-    run.add_argument("--coin", default=None,
-                     help="Coin symbol, comma-separated list, "
-                          "or omit for all pt_config.json coins")
-    run.add_argument("--lvl", type=int, default=2)
-    run.add_argument("--alloc", type=float, default=1.0)
-    run.add_argument("--pm", type=float, default=4.0)
-    run.add_argument("--starting-usd", type=float, default=1000.0)
-    run.add_argument("--run-id", default=None,
-                     help="Existing run_id to resume (default: new timestamped)")
-    run.add_argument("--serial", action="store_true",
-                     help="Disable Ray; run coins sequentially")
+    run = sub.add_parser(
+        "run",
+        help="Joint backtest, earliest viable per coin → now",
+    )
+    _add_replay_args(run)
     run.set_defaults(func=cmd_run)
+
+    sweep = sub.add_parser(
+        "sweep",
+        help="Joint sweep over (lvl, alloc, pm) — Ray task per param point",
+    )
+    sweep.add_argument("--coin", default=None,
+                       help="Coin symbol, comma-separated list, "
+                            "or omit for all pt_config.json coins")
+    sweep.add_argument("--run-id", required=True,
+                       help="Parent run_id with training data "
+                            "(produced by `backtest train`)")
+    sweep.add_argument("--lvls", default=None,
+                       help=f"Comma-separated trade_start_level values "
+                            f"(default: {','.join(map(str, _DEFAULT_LVLS))})")
+    sweep.add_argument("--allocs", default=None,
+                       help=f"Comma-separated start_allocation_pct values "
+                            f"(default: {','.join(map(str, _DEFAULT_ALLOCS))})")
+    sweep.add_argument("--pms", default=None,
+                       help=f"Comma-separated pm_start_pct values "
+                            f"(default: {','.join(map(str, _DEFAULT_PMS))})")
+    sweep.add_argument("--starting-usd", type=float, default=10000.0,
+                       help="Joint wallet starting cash per sub-run (default 10000)")
+    sweep.add_argument("--from-date", default=None,
+                       help="Earliest snapshot, ISO YYYY-MM-DD "
+                            "(default: earliest viable)")
+    sweep.add_argument("--until-date", default=None,
+                       help="Latest snapshot, ISO YYYY-MM-DD (default: now)")
+    sweep.add_argument("--serial", action="store_true",
+                       help="Disable Ray; run param points sequentially")
+    sweep.set_defaults(func=cmd_sweep)
 
     train = sub.add_parser(
         "train",
-        help="Produce all training_data.json artifacts (Ray-parallel across "
-             "coin × epoch). Replay/sweep can then reuse via --run-id.",
+        help="Produce all training_data.json artifacts "
+             "(Ray-parallel across coin × epoch)",
     )
     train.add_argument("--coin", default=None,
                        help="Coin symbol, comma-separated list, "
                             "or omit for all pt_config.json coins")
     train.add_argument("--epochs", type=int, default=None,
-                       help="Cap on epochs per coin (default: all viable)")
+                       help="Cap epochs per coin (default: all viable)")
     train.add_argument("--run-id", default=None,
                        help="Existing run_id to resume (default: new timestamped)")
     train.add_argument("--serial", action="store_true",
                        help="Disable Ray; train coin × epoch sequentially")
     train.set_defaults(func=cmd_train)
 
-    sweep = sub.add_parser("sweep", help="3D parameter sweep on one coin")
-    sweep.add_argument("--coin", default=None,
-                       help="Coin symbol, comma-separated list, "
-                            "or omit for all pt_config.json coins")
-    sweep.add_argument("--serial", action="store_true",
-                       help="Disable Ray; run param points serially")
-    sweep.set_defaults(func=cmd_sweep)
-
-    aggr = sub.add_parser("aggregate", help="Aggregate per-coin -> portfolio")
-    aggr.add_argument(
-        "run_id_pos", nargs="?", default=None,
-        metavar="run_id",
-        help="Run ID to aggregate (positional, or use --run-id)",
+    aggr = sub.add_parser(
+        "aggregate",
+        help="Re-derive portfolio_daily.parquet from an existing run",
     )
-    aggr.add_argument(
-        "--run-id", dest="run_id_kwarg", default=None,
-        help="Run ID to aggregate (alternative to the positional form)",
-    )
-    aggr.add_argument(
-        "--coin", default=None,
-        help="Coin symbol, comma-separated list, or omit for all "
-             "pt_config.json coins (the default).",
-    )
-    # Backwards-compat alias — older invocations used --coins (plural).
-    aggr.add_argument(
-        "--coins", dest="coins_legacy", default=None,
-        help=argparse.SUPPRESS,
-    )
+    aggr.add_argument("run_id_pos", nargs="?", default=None, metavar="run_id",
+                      help="Run ID to aggregate (positional, or use --run-id)")
+    aggr.add_argument("--run-id", dest="run_id_kwarg", default=None,
+                      help="Run ID to aggregate (alternative to positional)")
     aggr.set_defaults(func=cmd_aggregate)
 
     args = p.parse_args()

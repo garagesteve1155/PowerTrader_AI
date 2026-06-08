@@ -166,7 +166,7 @@ def run_one_bar(dump_path: Path, breakpoint_in: str | None = None) -> None:
     }
     print(f">>> training_data:      {td_path}")
     print(f">>> memory counts:      "
-          + ", ".join(f"{tf}={len(parsed[tf].memory_list)}" for tf in TF_NAMES))
+          + ", ".join(f"{tf}={len(parsed[tf].memory_candles)}" for tf in TF_NAMES))
     print()
 
     # Load all TF candles

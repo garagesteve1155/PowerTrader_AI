@@ -98,6 +98,99 @@ def _coin_list(daily):
 
 
 @app.cell
+def _coin_availability(run_id):
+    """Step chart of cumulative coin availability over time.
+
+    For each coin, finds its earliest trained epoch on disk
+    (`runs/<run_id>/training/<YYYYMMDD>/<COIN>/training_data.json`).
+    That's the first date the engine could trade that coin. The plot
+    steps up by 1 at each new coin's first epoch, labelled with the
+    ticker — handy for picking a `--from-date` where most coins are
+    already online.
+    """
+    if not run_id:
+        _avail_view = mo.md("*pick a run to see coin availability*")
+    else:
+        _tdir = os.path.join(RUNS_DIR, run_id, "training")
+        if not os.path.isdir(_tdir):
+            _avail_view = mo.md(
+                f"*no training tree at `runs/{run_id}/training/`*"
+            )
+        else:
+            # Walk epochs in chronological order; record the first
+            # epoch in which each coin appears with training_data.json.
+            _first_by_coin: dict[str, str] = {}
+            for _ep in sorted(os.listdir(_tdir)):
+                _ep_path = os.path.join(_tdir, _ep)
+                if not os.path.isdir(_ep_path):
+                    continue
+                for _coin in os.listdir(_ep_path):
+                    if _coin in _first_by_coin:
+                        continue
+                    if os.path.exists(
+                        os.path.join(_ep_path, _coin, "training_data.json")
+                    ):
+                        _first_by_coin[_coin] = _ep
+
+            if not _first_by_coin:
+                _avail_view = mo.md(
+                    "*no trained coins in this run's training tree*"
+                )
+            else:
+                # Sort events chronologically, ties broken alphabetically.
+                _events = sorted(
+                    [
+                        (pd.Timestamp(_ep, tz="UTC"), _coin)
+                        for _coin, _ep in _first_by_coin.items()
+                    ],
+                    key=lambda e: (e[0], e[1]),
+                )
+                _xs = [e[0] for e in _events]
+                _labels = [e[1] for e in _events]
+                _ys = list(range(1, len(_events) + 1))
+
+                _fig_avail = go.Figure()
+                _fig_avail.add_trace(go.Scatter(
+                    x=_xs,
+                    y=_ys,
+                    mode="lines+markers+text",
+                    line=dict(color="#2ca02c", width=2, shape="hv"),
+                    marker=dict(size=9, color="#2ca02c"),
+                    text=_labels,
+                    textposition="top center",
+                    textfont=dict(size=10),
+                    hovertemplate=(
+                        "<b>%{text}</b> first trained<br>"
+                        "%{x|%Y-%m-%d}<br>%{y} coins available"
+                        "<extra></extra>"
+                    ),
+                    name="coins available",
+                    cliponaxis=False,
+                ))
+                _fig_avail.update_layout(
+                    title=(
+                        f"Coin availability (first trained epoch) — "
+                        f"{len(_events)} coins in `{run_id}`"
+                    ),
+                    xaxis_title="Date",
+                    yaxis_title="Coins available",
+                    height=420,
+                    margin=dict(l=60, r=20, t=60, b=40),
+                    template="plotly_white",
+                    showlegend=False,
+                    hovermode="closest",
+                )
+                # Leave headroom for the top label.
+                _fig_avail.update_yaxes(
+                    range=[0, len(_events) + 2],
+                    dtick=1,
+                )
+                _avail_view = _fig_avail
+    _avail_view
+    return
+
+
+@app.cell
 def _headline(coins, contrib_cols, daily, fills, run_id):
     if daily.empty:
         headline = mo.md(
