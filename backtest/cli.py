@@ -86,6 +86,38 @@ Common options
                   walk one shared portfolio path-dependently, so
                   there is no parallelism to disable.
 
+--max-parallel    (`sweep` only) Cap concurrent sub-runs in Ray mode.
+                  Each sub-run is a full multi-coin joint backtest
+                  with ~3-5 GiB steady-state resident for a 5-year ×
+                  28-coin window after the engine memory fixes
+                  (np.unique master-grid build, DataFrames freed
+                  post-extraction).
+
+                  Default = min(8, num_cpus, (MemAvailable − 4 GiB) / 6 GiB),
+                  bounded to [1, 16]. A 32 GiB box with 26 GiB free
+                  picks 3-4 workers; a 64 GiB box picks 8 (capped).
+                  Shorter windows (`--from-date` recent) lower the
+                  per-worker peak so bumping the cap once you've
+                  shrunk the window is fine — `--max-parallel`
+                  overrides the auto-detect.
+
+                  Implementation belt-and-suspenders: `num_cpus` is
+                  passed to `ray.init` AND the submission loop runs a
+                  sliding window so at most `max_parallel` futures
+                  exist concurrently. Each remote task is registered
+                  with `max_calls=1`, forcing a fresh Python process
+                  per sub-run so pandas / arctic / fills buffers can't
+                  accumulate across tasks. Ray's Plasma object store
+                  is capped at 2 GiB (vs. its default ~30 % of RAM).
+
+                  The chosen value + measured MemAvailable are logged
+                  on startup and emitted as a `sweep_concurrency`
+                  event on `report.jsonl`.
+
+                  Pass `--max-parallel 1` for a memory-test single
+                  worker, or set it higher (e.g. `12`) on a beefier
+                  Linux box with no WSL ceiling.
+
 Joint-replay-only options
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 --lvl, --alloc, --pm
@@ -148,6 +180,152 @@ echoed on startup so you can `tail -f` from a second terminal.
 
 The joint engine writes a per-snapshot heartbeat to its own log and
 a daemon watchdog kills the process if no progress is made for 120s.
+
+Monitoring a sweep
+------------------
+A sweep launches one joint backtest per grid point as a Ray task. Three
+ways to watch it:
+
+1) `tail -f runs/<parent>/report.jsonl` — the driver writes a
+   `sweep_progress` event after every sub-run completes, with the
+   running `n_done/n_total`, the grid coords (lvl/alloc/pm), the
+   sub-run's pct_return, fill count, and any error string. Drains
+   one-at-a-time via `ray.wait`, so the feed updates as workers
+   finish (not all at the end).
+
+2) Worker engine heartbeats stream to the driver terminal. Ray is
+   initialised with `log_to_driver=True` so each worker's per-1000-bar
+   heartbeats (bar count, cash, total, ETA) interleave on stdout.
+   Lines are prefixed with the worker PID so you can demux by point.
+   Noisy with 27+ points — pipe through `grep <pid>` or `tee`.
+
+3) File-system completion check (works from anywhere, no Ray needed):
+       PARENT=<parent_run_id>
+       watch -n 15 'ls backtest/runs/'$PARENT'/sweep/*/series.parquet \
+                       2>/dev/null | wc -l'
+   `series.parquet` only appears when a sub-run finishes; the count is
+   "X of grid_size done". `portfolio_checkpoint.pkl`'s mtime is the
+   "this sub-run is still alive" signal for in-flight points.
+
+At end-of-sweep the driver prints the top 5 by `pct_return`, the rollup
+parquet path, and writes a final `run_completed` event.
+
+Sweep memory & concurrency
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+Each Ray task is a full multi-coin joint backtest: it loads kucoin5 +
+7 trained TF grids for every coin, plus accumulating fills/series and
+pandas / arctic / pyarrow caches. Steady-state is 2–4 GiB per worker
+for a 5-year × 28-coin run; spikes go higher under GC pressure. With
+16 logical CPUs spawning concurrently, that's enough to exhaust WSL2's
+default 50 %-of-host memory ceiling and cascade into swap-thrashing.
+
+Four backstops layered in defence-in-depth:
+
+a) `ray.init(num_cpus=max_parallel)` caps the Ray scheduler pool.
+b) The submission loop runs a sliding window of `max_parallel` futures
+   in flight, so Ray's own queue doesn't accumulate either.
+c) The remote function is registered with `max_calls=1`, forcing a
+   fresh Python process per sub-run. This is the most impactful fix
+   against creeping memory: pandas frame caches, pyarrow buffers, and
+   the fills/series lists all get released by the OS when the worker
+   exits between tasks. Costs ~1 s fork overhead per sub-run, which
+   is invisible against 5–30 minutes of real work.
+d) Ray's Plasma object store is capped at 2 GiB (vs. its default
+   ~30 % of RAM = ~10 GiB on a 32 GiB box). The sub-run results are
+   tiny dicts — Plasma doesn't need GiBs of headroom.
+
+Default `max_parallel` comes from `_auto_max_parallel()`:
+  cpu_cap  = min(8, num_cpus)
+  mem_cap  = floor((MemAvailable − 4 GiB driver reserve) / 14 GiB)
+  result   = max(1, min(cpu_cap, mem_cap, 16))
+
+Per-worker budget (14 GiB) is empirical — both workers in a
+`--max-parallel 2` run grew to ~12.7 GiB each within 12 s of startup,
+*before either walk began*, just from loading 196 TF DataFrames and
+materialising the union timestamp index. A 32 GiB WSL2 ceiling
+therefore cannot host >1 worker on a 5y × 28-coin window. The mem_cap
+formula reflects this.
+
+Override with `--max-parallel N` if you know your box. On startup the
+driver prints the chosen value, measured `MemAvailable`, per-worker
+reserve, Plasma cap, and `max_calls=1`. The same data lands as a
+`sweep_concurrency` event in `report.jsonl`.
+
+Monitoring during a sweep:
+   watch -n 5 'free -g; echo; ps aux --sort=-rss | head -10'
+
+If `Swap` ever climbs above ~1 GiB during the run, kill and re-launch
+with a lower `--max-parallel` (or raise `_PER_WORKER_GB` in cli.py if
+you want the auto-detect to be more conservative). Sub-runs are
+checkpointed inside each sub-run dir, so re-launching with the same
+`--run-id` resumes each grid point from its last snapshot.
+
+Spotting Ray-killed workers
+---------------------------
+A spike-then-drop pattern in `free -g` during a sweep is almost always
+Ray's OOM monitor killing a sub-run that breached the per-worker budget
+(or Linux's OOM-killer doing the same one layer down). The symptom in
+`report.jsonl`:
+
+    {"event": "sweep_progress", ..., "lvl": 3, "alloc": 2.0, "pm": 7.5,
+     "pct_return": null, "error": "ray.get failed: OutOfMemoryError: ..."}
+
+Or you'll see `OutOfMemoryError` in the worker log line just before
+the spike resolves. Ray's default behaviour is to retry the failed
+task 3× — which here is dangerous because the same param combo would
+keep dying the same way. The sweep launcher overrides this with
+`max_retries=0`: a killed grid point gets reported once with an error
+field, the slot is freed for the next combo, and you re-run that
+specific point later (see below).
+
+Victim vs. offender — Ray's memory monitor at the *node* level kills
+the most recently scheduled task when total node RAM exceeds 95 %.
+That victim is NOT necessarily the actual memory hog. A typical OOM
+message looks like:
+
+    Memory on the node was 29.74GB / 31.22GB (0.952), which exceeds
+    the memory usage threshold of 0.95. Ray killed this worker
+    (pid=72341, memory used=3.13GB) because it was the most recently
+    scheduled task.
+
+The killed worker only had 3.13 GiB resident — but the *other*
+worker concurrently running with `--max-parallel ≥ 2` had ballooned
+to ~25 GiB and pushed the node over the threshold. The error row
+in `sweep_results.parquet` correctly tags the victim's combo (we
+track futures → params), but to find the actual offender you have
+to isolate: re-run the suspect subset with `--max-parallel 1`.
+With one worker, victim and offender are the same combo.
+
+Some param combos (typically aggressive ones: low `lvl`, high
+`alloc`, high `pm`) generate many more fills + DCA window entries
+than conservative ones, accumulating multi-GiB of trader state per
+sub-run. If `--max-parallel 1` still OOMs on a specific combo,
+that's a real signal — the engine can't fit that combo in WSL's
+memory ceiling and you either need to shorten the window
+(`--from-date`) or bump WSL memory in `.wslconfig`.
+
+Resuming an interrupted sweep
+-----------------------------
+Re-launch the exact same command with the same `--run-id`. The CLI
+pre-flights every grid point against disk: any sub-run with both
+`series.parquet` and `portfolio_daily.parquet` written is treated as
+done, its row is reconstructed by reading the parquet directly (no
+worker spawn, no re-walking), and a `sweep_progress` event flagged
+`"from_cache": true` is emitted.
+
+A `sweep_resume` event logs the split:
+
+    {"event": "sweep_resume", "n_cached": 47, "n_to_run": 28,
+     "n_total": 75}
+
+So a sweep that died at ~60 % gets ~60 % of its work back for free
+on re-launch; only the unfinished + previously-OOM-killed points run.
+Workers that crashed mid-walk also resume from their per-sub-run
+`portfolio_checkpoint.pkl`, so even those get partial credit.
+
+If a specific param combo keeps dying after retries, that's the
+clearest signal `--max-parallel` is still too high — drop it to 1
+and let the offender run alone.
 
 Output layout
 -------------
@@ -365,6 +543,171 @@ def _parse_csv_ints(s: Optional[str], default: list) -> list[int]:
     return [int(x.strip()) for x in s.split(",") if x.strip()]
 
 
+# ---------------------------------------------------------------------------
+# Concurrency policy (sweep)
+# ---------------------------------------------------------------------------
+
+# Per-worker memory budget. Calibrated against a 5y × 28-coin joint
+# backtest after eliminating the trade-history scan (the biggest single
+# memory hog in the engine — see backtest/trader.py):
+#
+#   Phase            Resident         What dominates
+#   ----------------+----------------+--------------------------------------
+#   load TF frames   ~110 MiB/coin    Arctic LMDB reads → numpy projections;
+#                                     DataFrames briefly held then freed
+#   build master idx ~0.3 GiB peak    np.concatenate + np.unique on i8 ns
+#   post-build       ~110 MiB/coin    Walk-steady-state, dominated by per-
+#                                     coin grid5_* + tf_ts_ns/opens arrays
+#   walk             same             No accumulation observed: fills/series
+#                                     are appended dicts, tiny vs the data
+#
+# Observed walk-steady-state on the wire after trade-history fix:
+# 5-coin pilot ~557 MiB, scales to ~3 GiB at 28 coins. No transient
+# spike. 4 GiB budget covers steady-state + comfortable headroom.
+_PER_WORKER_GB = 4.0
+
+# Always leave this much free for the driver, Ray's own bookkeeping, and the
+# host OS. Computed on top of the per-worker reserve.
+_DRIVER_RESERVE_GB = 4.0
+
+# Ray's Plasma object store. Defaults to ~30 % of system RAM (≈10 GiB on a
+# 32 GiB box) which is overkill — our task results are tiny dicts. Cap at
+# 2 GiB so it doesn't compete with worker resident sets.
+_RAY_OBJECT_STORE_GB = 2.0
+
+
+def _available_memory_gb() -> float:
+    """Best-effort MemAvailable in GiB. Reads /proc/meminfo on Linux/WSL2;
+    falls back to a conservative 8 GiB if anything goes wrong (e.g. macOS,
+    container without /proc, permission denied).
+    """
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    kb = float(line.split()[1])
+                    return kb / (1024 * 1024)
+    except Exception:
+        pass
+    return 8.0
+
+
+def _auto_max_parallel() -> int:
+    """Default `--max-parallel` for a sweep on this host.
+
+    Bounded by both CPU and memory:
+      cpu_cap  = min(8, os.cpu_count())  — Ray's per-worker accounting
+                  scales sub-linearly past ~8 on this engine.
+      mem_cap  = floor((MemAvailable − driver_reserve) / per_worker_gb)
+    The minimum of those two, never less than 1, never more than 16.
+    """
+    import os
+    cpu_cap = min(8, os.cpu_count() or 4)
+    avail_gb = _available_memory_gb()
+    headroom = max(0.0, avail_gb - _DRIVER_RESERVE_GB)
+    mem_cap = max(1, int(headroom // _PER_WORKER_GB))
+    return max(1, min(16, cpu_cap, mem_cap))
+
+
+def _norm_nan(v):
+    """JSONL-safe normaliser: NaN/inf become None.
+
+    `json.dumps(float('nan'))` emits the literal `NaN`, which most JSON
+    parsers reject. The sweep_progress events go to `report.jsonl` that
+    downstream tools tail; keep it strict.
+    """
+    import math
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    return v
+
+
+def _emit_sweep_progress(parent_run_id: str, n_done: int, n_total: int,
+                        res: dict) -> None:
+    """Log one sweep_progress event + a one-line stdout summary.
+
+    Called once per sub-run completion in both Ray and serial modes. The
+    JSONL event lets `tail -f report.jsonl` show a live `12/27 done` feed
+    even when worker stdout is going elsewhere.
+    """
+    label = f"lvl{int(res['lvl'])}_a{res['alloc']}_p{res['pm']}"
+    pct = _norm_nan(res.get("pct_return"))
+    final_v = _norm_nan(res.get("final_value"))
+    rpt.event(
+        parent_run_id, "sweep_progress",
+        n_done=int(n_done), n_total=int(n_total),
+        sub_run_id=res.get("sub_run_id"),
+        lvl=int(res["lvl"]), alloc=float(res["alloc"]), pm=float(res["pm"]),
+        pct_return=pct,
+        final_value=final_v,
+        n_fills=int(res.get("n_fills") or 0),
+        error=res.get("error"),
+    )
+    pct_s = f"{pct:+.2f}%" if pct is not None else "n/a"
+    err_s = f"  ERROR={res['error']}" if res.get("error") else ""
+    print(f"[sweep] {n_done}/{n_total} done · {label} "
+          f"return={pct_s}  fills={int(res.get('n_fills') or 0)}{err_s}",
+          flush=True)
+
+
+def _sweep_already_done(parent: str, lvl: int, alloc: float, pm: float) -> bool:
+    """True iff this grid point already has both completion markers on disk.
+
+    `portfolio_daily.parquet` is the final aggregation artefact (written
+    after `series.parquet`), so its presence means the sub-run completed
+    cleanly. `series.parquet` alone wouldn't be sufficient — a sub-run
+    could have crashed between writing series and writing daily.
+    """
+    from . import workspace as ws
+    sub_id = _sweep_sub_run_id(parent, lvl, alloc, pm)
+    sub_dir = ws.run_dir(sub_id)
+    return (
+        (sub_dir / "series.parquet").exists()
+        and (sub_dir / "portfolio_daily.parquet").exists()
+    )
+
+
+def _sweep_load_done_result(parent: str, lvl: int, alloc: float, pm: float,
+                            starting_usd: float) -> dict:
+    """Reconstruct the row that the worker would have returned, by reading
+    `portfolio_daily.parquet` directly. Saves re-running an already-done
+    sub-run while still producing a complete `sweep_results.parquet`."""
+    sub_id = _sweep_sub_run_id(parent, lvl, alloc, pm)
+    sub_dir = ws.run_dir(sub_id)
+    out = {
+        "lvl": int(lvl), "alloc": float(alloc), "pm": float(pm),
+        "sub_run_id": sub_id, "starting_value": float(starting_usd),
+        "final_value": float("nan"), "pct_return": float("nan"),
+        "n_fills": 0, "n_snapshots": 0,
+        "coins_active": 0, "coins_skipped": 0,
+        "error": None, "from_cache": True,
+    }
+    try:
+        daily = pd.read_parquet(sub_dir / "portfolio_daily.parquet")
+        if not daily.empty:
+            start_v = float(daily["total_account_value"].iloc[0])
+            last_v = float(daily["total_account_value"].iloc[-1])
+            out["starting_value"] = start_v
+            out["final_value"] = last_v
+            out["pct_return"] = (
+                ((last_v / start_v) - 1.0) * 100.0 if start_v else 0.0
+            )
+            out["n_snapshots"] = int(len(daily))
+        series_path = sub_dir / "series.parquet"
+        if series_path.exists():
+            n_fills = pd.read_parquet(
+                series_path, columns=["ts"],
+            ).shape[0]  # rough; real count is in fills.parquet if present
+            fills_path = sub_dir / "fills.parquet"
+            if fills_path.exists():
+                out["n_fills"] = int(
+                    pd.read_parquet(fills_path, columns=["ts"]).shape[0]
+                )
+    except Exception as e:
+        out["error"] = f"cache-read failed: {type(e).__name__}: {e}"
+    return out
+
+
 def _sweep_sub_run_id(parent: str, lvl: int, alloc: float, pm: float) -> str:
     # Nested under the parent so the sweep is one tidy subtree on disk:
     # runs/<parent>/sweep/l<L>_a<A>_p<P>/. ws.run_dir resolves the
@@ -520,21 +863,197 @@ def cmd_sweep(args):
 
     if use_ray:
         import ray  # type: ignore
+        # Concurrency cap. Default protects WSL2: each sub-run loads a
+        # multi-GiB price + training-data footprint, and 16 logical CPUs
+        # running concurrently can blow past the WSL memory ceiling.
+        max_parallel = (
+            int(args.max_parallel) if args.max_parallel is not None
+            else _auto_max_parallel()
+        )
+        max_parallel = max(1, min(max_parallel, len(grid)))
+        avail_gb = _available_memory_gb()
+        _stagger_s = float(args.stagger) if args.stagger is not None else 90.0
+        print(f"[sweep] concurrency cap: {max_parallel} workers  "
+              f"(MemAvailable {avail_gb:.1f} GiB, "
+              f"per-worker reserve {_PER_WORKER_GB:.0f} GiB, "
+              f"Ray object store {_RAY_OBJECT_STORE_GB:.0f} GiB, "
+              f"max_calls=1, max_retries=0, "
+              f"stagger {_stagger_s:.0f}s)")
+        rpt.event(
+            parent_run_id, "sweep_concurrency",
+            max_parallel=max_parallel,
+            available_gb=round(avail_gb, 1),
+            per_worker_gb=_PER_WORKER_GB,
+            grid_size=len(grid),
+        )
+
         if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True, log_to_driver=False)
-        remote = ray.remote(_sweep_worker)
-        futures = [
-            remote.remote(parent_run_id, coins, float(args.starting_usd),
-                          until_iso, from_iso, lvl, alloc, pm)
-            for (lvl, alloc, pm) in grid
-        ]
-        results = ray.get(futures)
+            # num_cpus caps the worker pool. log_to_driver=True streams
+            # per-worker engine heartbeats to this terminal — noisy with
+            # many workers but invaluable for spotting a stuck point.
+            # Set RAY_LOG_TO_DRIVER=0 in env to override if it overwhelms.
+            #
+            # object_store_memory: Ray defaults to ~30 % of RAM for the
+            # Plasma store. Our task results are tiny dicts — capping at
+            # _RAY_OBJECT_STORE_GB stops Plasma from competing with worker
+            # resident sets for the same memory page.
+            ray.init(
+                ignore_reinit_error=True,
+                log_to_driver=True,
+                num_cpus=max_parallel,
+                object_store_memory=int(_RAY_OBJECT_STORE_GB * 1024**3),
+            )
+        # max_calls=1     forces a fresh Python process per sub-run.
+        #                 Each _sweep_worker imports pandas / arctic /
+        #                 pt_trader and accumulates frame caches, pyarrow
+        #                 buffers, and a fills/series list of its own —
+        #                 none of which fully release between tasks if
+        #                 the worker is reused. ~1 s fork overhead per
+        #                 task is invisible against 5-30 min of real work.
+        # max_retries=0   the Ray default of 3 retries is dangerous here:
+        #                 if a sub-run is killed by the OOM monitor at
+        #                 RAM saturation, Ray re-launches the same task
+        #                 with the same memory profile, which dies the
+        #                 same way. Zero retries → fail fast, report the
+        #                 error once, free the slot for the next point.
+        remote = ray.remote(max_calls=1, max_retries=0)(_sweep_worker)
+
+        # Pre-flight: split the grid into "already done" (load result
+        # from disk) and "needs running" (submit to Ray). A sub-run is
+        # considered done when both series.parquet and
+        # portfolio_daily.parquet exist in its dir.
+        cached_results: list[dict] = []
+        live_grid: list[tuple[int, float, float]] = []
+        for (lvl, alloc, pm) in grid:
+            if _sweep_already_done(parent_run_id, lvl, alloc, pm):
+                cached_results.append(_sweep_load_done_result(
+                    parent_run_id, lvl, alloc, pm, float(args.starting_usd),
+                ))
+            else:
+                live_grid.append((lvl, alloc, pm))
+        if cached_results:
+            print(f"[sweep] skipping {len(cached_results)} already-done "
+                  f"sub-runs; running {len(live_grid)} fresh")
+            rpt.event(
+                parent_run_id, "sweep_resume",
+                n_cached=len(cached_results), n_to_run=len(live_grid),
+                n_total=len(grid),
+            )
+
+        # Sliding-window submission. We never have more than `max_parallel`
+        # futures in flight; new ones are submitted only as old ones drain.
+        # Belt-and-suspenders with num_cpus above: bounds Ray's scheduler
+        # queue too, keeping the driver's reference-list small.
+        #
+        # future_to_params: tracks which (lvl, alloc, pm) is behind each
+        # ObjectRef so that when Ray's OOM monitor kills a worker (which
+        # picks the most recently scheduled task as the victim — NOT
+        # necessarily the actual memory hog) we still know which combo
+        # the killed worker was running. Without this, all OOM-killed
+        # rows in sweep_results.parquet would have sentinel (-1,-1,-1)
+        # params, blocking targeted re-runs.
+        future_to_params: dict = {}
+        pending = list(live_grid)
+        in_flight: list = []
+        results: list = list(cached_results)
+        for res in cached_results:
+            _emit_sweep_progress(parent_run_id, len(results), len(grid), res)
+        # Stagger between worker submissions (seconds). Each new worker
+        # spawns a fresh Python process whose first ~60-120 s of work is
+        # memory-heavy: arctic decompresses 196 kucoin{N} frames into
+        # pandas (transient ~2× RSS bump before tf_frames.clear() runs),
+        # then the trader processes bar 0 with all 28 coins' epoch-zero
+        # training-data parses, then the first manage_trades call sets
+        # up internal state for every coin. Letting one worker get past
+        # that entire phase before the next starts prevents concurrent
+        # peaks colliding under Ray's 95 % OOM monitor.
+        #
+        # 90 s is calibrated empirically — Daisy observed that 15 s
+        # wasn't enough to avoid OOM kills on a 32 GiB WSL2 box with 2
+        # concurrent workers. Total overhead: (max_parallel-1) × stagger,
+        # e.g. 90 s on a 2-worker sweep — invisible against minutes-to-
+        # hours of work per sub-run. Override via --stagger N.
+        _STAGGER_S = float(args.stagger) if args.stagger is not None else 90.0
+        _last_submit_t = 0.0
+        while pending or in_flight:
+            while pending and len(in_flight) < max_parallel:
+                # Throttle submissions so workers don't all hit the
+                # data-load peak at the same instant. The first task
+                # submits immediately (gap = inf since _last_submit_t=0).
+                _gap = time.monotonic() - _last_submit_t
+                if _gap < _STAGGER_S and len(in_flight) > 0:
+                    break  # fall through to ray.wait until stagger elapses
+                lvl, alloc, pm = pending.pop(0)
+                fut = remote.remote(
+                    parent_run_id, coins, float(args.starting_usd),
+                    until_iso, from_iso, lvl, alloc, pm,
+                )
+                future_to_params[fut] = (lvl, alloc, pm)
+                in_flight.append(fut)
+                _last_submit_t = time.monotonic()
+                print(f"[sweep] launched lvl{lvl}_a{alloc}_p{pm}  "
+                      f"({len(in_flight)}/{max_parallel} workers active, "
+                      f"{len(pending)} pending)", flush=True)
+            if in_flight:
+                # ray.wait with a short timeout so we can re-check the
+                # stagger condition for pending submissions. Without
+                # the timeout, ray.wait would block until a worker
+                # completes — possibly many minutes — even if the
+                # stagger window has elapsed.
+                _wait_to = max(1.0, _STAGGER_S - (time.monotonic() - _last_submit_t))
+                done_refs_x, _maybe_remaining = ray.wait(
+                    in_flight, num_returns=1, timeout=_wait_to,
+                )
+                if not done_refs_x:
+                    continue   # stagger elapsed, loop to submit next
+                done_refs = done_refs_x
+                in_flight = _maybe_remaining
+                done_fut = done_refs[0]
+                done_lvl, done_alloc, done_pm = future_to_params.pop(
+                    done_fut, (-1, -1.0, -1.0),
+                )
+                try:
+                    res = ray.get(done_fut)
+                except Exception as e:
+                    # ray.get re-raises worker exceptions (incl. OOM kills).
+                    # Surface them as a result row so the rollup is complete,
+                    # tagged with the actual combo (not -1 sentinels) so
+                    # re-launching with the same --run-id targets the right
+                    # sub-run dir.
+                    sub_id = (
+                        _sweep_sub_run_id(
+                            parent_run_id, done_lvl, done_alloc, done_pm,
+                        ) if done_lvl != -1 else None
+                    )
+                    res = {
+                        "lvl": int(done_lvl),
+                        "alloc": float(done_alloc),
+                        "pm": float(done_pm),
+                        "sub_run_id": sub_id,
+                        "starting_value": float(args.starting_usd),
+                        "final_value": float("nan"),
+                        "pct_return": float("nan"),
+                        "n_fills": 0, "n_snapshots": 0,
+                        "coins_active": 0, "coins_skipped": 0,
+                        "error": f"ray.get failed: {type(e).__name__}: {e}",
+                    }
+                results.append(res)
+                _emit_sweep_progress(parent_run_id, len(results), len(grid), res)
     else:
-        results = [
-            _sweep_worker(parent_run_id, coins, float(args.starting_usd),
-                          until_iso, from_iso, lvl, alloc, pm)
-            for (lvl, alloc, pm) in grid
-        ]
+        # Serial path mirrors the same skip-completed logic for resumability.
+        results = []
+        for (lvl, alloc, pm) in grid:
+            if _sweep_already_done(parent_run_id, lvl, alloc, pm):
+                res = _sweep_load_done_result(
+                    parent_run_id, lvl, alloc, pm, float(args.starting_usd),
+                )
+            else:
+                res = _sweep_worker(
+                    parent_run_id, coins, float(args.starting_usd),
+                    until_iso, from_iso, lvl, alloc, pm,
+                )
+            results.append(res)
+            _emit_sweep_progress(parent_run_id, len(results), len(grid), res)
 
     # Headline rollup (one row per param point)
     res_df = pd.DataFrame(results)
@@ -740,6 +1259,22 @@ def main():
                        help="Latest snapshot, ISO YYYY-MM-DD (default: now)")
     sweep.add_argument("--serial", action="store_true",
                        help="Disable Ray; run param points sequentially")
+    sweep.add_argument(
+        "--max-parallel", type=int, default=None,
+        help="Maximum concurrent sub-runs in Ray mode. Default is "
+             "min(8, cpus, (MemAvailable - 4 GiB) // 8 GiB) — bounded by "
+             "both CPU and memory so a big sweep can't OOM WSL2. Pass "
+             "an explicit integer to override (1 = effectively serial).",
+    )
+    sweep.add_argument(
+        "--stagger", type=float, default=None,
+        help="Seconds between worker submissions (default 90). Each "
+             "fresh worker spikes RAM during the 60-120 s data-load + "
+             "bar-0 phase before settling to walk steady-state; the "
+             "stagger lets one worker finish that phase before the next "
+             "starts, so concurrent peaks don't collide. Drop to 0 to "
+             "submit all workers at once; raise if RAM still spikes.",
+    )
     sweep.set_defaults(func=cmd_sweep)
 
     train = sub.add_parser(

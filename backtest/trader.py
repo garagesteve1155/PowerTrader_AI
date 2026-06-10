@@ -243,6 +243,41 @@ class BacktestTrader(CryptoAPITrading):
         return
 
     # ------------------------------------------------------------------
+    # Trade-history reads — prod scans TRADE_HISTORY_PATH (a 5+ GiB
+    # JSONL of every demo run since inception). Backtest has no
+    # prior history; suppress the scan entirely.
+    #
+    # The path is set via EXCHANGE_KEY ("demo" by default), points at
+    # state/hub_data/exchanges/demo/trade_history.jsonl. Reading +
+    # JSON-parsing that file line-by-line allocates ~5-10× its size as
+    # transient Python objects — observed peak ~28 GiB for a 5.4 GiB
+    # file, blowing past Ray's 95 % node-memory threshold. The pure-
+    # state engine doesn't need any of it.
+    # ------------------------------------------------------------------
+
+    def initialize_dca_levels(self):
+        # Production reads TRADE_HISTORY_PATH; backtest starts from a
+        # blank ledger so DCA state is whatever the in-memory loop has
+        # accumulated this run.
+        return
+
+    def _load_bot_order_ids_from_trade_history(self) -> dict:
+        # Same path — prod scans the same 5 GiB file. Return empty so
+        # cost-basis calculations fall back to the in-memory ledger.
+        return {}
+
+    def _seed_dca_window_from_history(self) -> None:
+        # Already gated by BacktestTrader.__init__ not calling this,
+        # but override defensively in case any prod helper triggers it.
+        return
+
+    def _maybe_reload_bot_order_ids(self) -> bool:
+        # Prod hot-reloads bot_order_ids.json when its mtime changes;
+        # that path also calls _load_bot_order_ids_from_trade_history()
+        # which scans the 5 GiB trade-history file. Suppress entirely.
+        return False
+
+    # ------------------------------------------------------------------
     # LTH EMA gate — backtest skips LTH allocation
     # ------------------------------------------------------------------
 

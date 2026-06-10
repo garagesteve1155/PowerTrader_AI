@@ -246,6 +246,56 @@ The current defensive `try/except` coverage is intentionally broad to capture a 
 
 5. **Design signal.** If removing a guard feels wrong, that usually means the function is doing too much — mixing network calls, arithmetic, and file writes. Fail-fast pressure naturally pushes toward separating those concerns: pure functions can assert preconditions, I/O functions handle transient errors at the call site.
 
+### TODO: revisit trade_history.jsonl storage
+
+The current `state/hub_data/exchanges/<exchange>/trade_history.jsonl` format is
+a plain-text JSON-lines append-only log. `initialize_dca_levels` and
+`_load_bot_order_ids_from_trade_history` both line-scan the full file at every
+trader-process restart to reconstruct DCA stage state + bot order ID
+membership. That's fine on Kraken/shadow (~30-50 KiB each in steady state)
+but the demo file has grown to ~5 GiB and is now expensive to bring up:
+
+- ~3 minutes of CPU on restart just to scan the file
+- ~28 GiB transient RSS as Python `json.loads` allocates one dict per line —
+  enough to OOM-kill workers under Ray on a 32 GiB box, observed first
+  during backtest sweeps but applies equally to prod demo restart
+
+Backtest works around it by overriding the relevant trader methods in
+`backtest/trader.py`. Prod can still get bitten by it on the next demo
+restart.
+
+Options worth evaluating when there's bandwidth:
+
+1. **Rotate by month + gzip archives.** Keep `trade_history_YYYY-MM.jsonl`
+   for the current month, gzip older segments. Startup only reads the
+   last N months. Smallest behavioural change, no schema migration.
+
+2. **Compaction snapshot.** Periodically write a `dca_state_snapshot.json`
+   (small dict of `{coin: {dca_count, last_sell_ts}}`). `initialize_dca_levels`
+   reads the snapshot + only the JSONL lines after its timestamp. Lookup
+   becomes ~50 ms regardless of total history size.
+
+3. **SQLite with an index on `(coin, ts)`.** `initialize_dca_levels` becomes
+   a single indexed SQL query, ~5 ms regardless of history. stdlib, no new
+   deps. One-time migration script reads existing JSONL → bulk insert.
+
+4. **ArcticDB.** Already a dependency. Same consistent storage story as the
+   OHLCV data; sorted-DataFrame reads are millisecond.
+
+Quick mitigation today if a demo restart is imminent: archive the current
+file and truncate to the recent tail, e.g.
+
+```bash
+cp state/hub_data/exchanges/demo/trade_history.jsonl \
+   state/hub_data/exchanges/demo/trade_history_archive_$(date +%Y%m%d).jsonl
+tail -10000 state/hub_data/exchanges/demo/trade_history.jsonl > /tmp/tail.jsonl
+mv /tmp/tail.jsonl state/hub_data/exchanges/demo/trade_history.jsonl
+```
+
+`initialize_dca_levels` only needs entries since the most recent sell per
+coin, so retaining the last few thousand lines is safe for the demo
+trader's restart-recovery logic.
+
 ---
 
 IMPORTANT: This software places real trades automatically. You are responsible for everything it does to your money and your account. Keep your API keys private. I am not giving financial advice. I am not responsible for any losses incurred or any security breaches to your computer (the code is entirely open source and can be confirmed non-malicious). You are fully responsible for doing your own due diligence to learn and understand this trading system and to use it properly. You are fully responsible for all of your money and all of the bot's actions, and any gains or losses.

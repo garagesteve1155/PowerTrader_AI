@@ -112,11 +112,21 @@ def _save_checkpoint(
     cached_epoch_ts: dict,
     fills: list,
     series: list,
+    params_sig: Optional[tuple] = None,
 ) -> None:
-    """Atomic write of full joint-engine state."""
+    """Atomic write of full joint-engine state.
+
+    params_sig is the (trade_start_level, start_allocation_pct,
+    pm_start_pct) tuple of the run that produced this checkpoint.
+    Loaded back via _load_checkpoint and compared at startup so a
+    `pilot`/`run` invocation can't silently resume a checkpoint
+    from a different param combo (different combos → different
+    state trajectory, so resuming would be a correctness bug).
+    """
     payload = {
         "version": _CHECKPOINT_VERSION,
         "last_completed_bar_ts": float(last_bar_ts),
+        "params_sig": params_sig,
         "exchange": exchange_state,
         "trader": trader_state,
         "thinker_states": thinker_states,
@@ -179,6 +189,22 @@ def run_portfolio(
         print(f"{tag} {_iso(_dt.datetime.now(_dt.timezone.utc))} {msg}",
               flush=True)
 
+    # ── Memory instrumentation ────────────────────────────────────
+    # Lightweight RSS reader for diagnostic logging — no dependency
+    # on psutil. /proc/self/status's VmRSS is the resident set size
+    # in KiB (Linux/WSL). Returns 0.0 on platforms without it.
+    def _rss_mib() -> float:
+        try:
+            with open(f"/proc/{os.getpid()}/status") as _f:
+                for _line in _f:
+                    if _line.startswith("VmRSS:"):
+                        return float(_line.split()[1]) / 1024.0
+        except Exception:
+            pass
+        return 0.0
+
+    _log(f"startup rss={_rss_mib():.0f} MiB")
+
     _log(f"start run_id={run_id}  coins={len(cfg.coins)}  "
          f"starting=${cfg.starting_usd:,.0f}  "
          f"params=lvl{cfg.params.trade_start_level}_"
@@ -213,22 +239,31 @@ def run_portfolio(
             if grid5.empty:
                 skipped.append(c)
                 continue
-        # Phase 2b: precompute numpy column arrays + dict[int_ns -> row_idx]
-        # for the master kucoin5 grid. Eliminates ~88s of pandas `.loc[T]`
-        # overhead per month from the hot loop in favour of O(1) dict
-        # lookup + int-indexed numpy reads.
+        # Phase 2b: precompute numpy column arrays for the master kucoin5
+        # grid. Eliminates ~88s of pandas `.loc[T]` overhead per month
+        # from the hot loop in favour of int-indexed numpy reads.
+        #
+        # Lookup-by-ns is via np.searchsorted on grid5_ts_ns rather than
+        # a Python dict — kucoin5 indices are monotonically sorted so a
+        # binary search is O(log N) at ~1 µs per call AND uses ~0 extra
+        # memory. The old grid5_idx_by_ns dict held 525k Python int keys
+        # + 525k Python int values + dict overhead = ~50 MiB per coin,
+        # which on 28 coins was a flat ~1.5 GiB of pure dead weight.
         g5_ts_ns = grid5.index.values.astype("datetime64[ns]").view("i8")
         coin_meta[c] = {
             "sched": sched,
             "epoch_starts": [s.timestamp() for s in sched],
-            "grid5": grid5,                # kept for the union-of-indices below
             "first_ts": grid5.index[0],
             "first_ts_ns": int(g5_ts_ns[0]),
-            "grid5_idx_by_ns": {int(g5_ts_ns[i]): i for i in range(len(g5_ts_ns))},
+            # int64 ns timestamps — used both for the master-grid union
+            # below and for the hot-loop searchsorted lookup. The
+            # original DataFrame is freed.
+            "grid5_ts_ns": g5_ts_ns,
             "grid5_lows":   grid5["low"].values.astype(np.float64),
             "grid5_highs":  grid5["high"].values.astype(np.float64),
             "grid5_closes": grid5["close"].values.astype(np.float64),
         }
+        del grid5
 
     if skipped:
         _log(f"skipped {len(skipped)} coin(s) with no viable epochs or no "
@@ -255,7 +290,7 @@ def run_portfolio(
                 active = [x for x in active if x != c]
                 skipped.append(c)
                 break
-    _log(f"loaded {len(tf_frames)} TF candle frames")
+    _log(f"loaded {len(tf_frames)} TF candle frames  rss={_rss_mib():.0f} MiB")
 
     # Phase 2b: pre-extract int64-ns timestamp arrays + float64 open
     # arrays per (coin, tf). The hot loop uses np.searchsorted over the
@@ -272,18 +307,39 @@ def run_portfolio(
         tf_ts_ns[(c, tf_min)] = df.index.values.astype("datetime64[ns]").view("i8")
         tf_opens[(c, tf_min)] = df["open"].values.astype(np.float64)
 
+    # Free the per-TF DataFrames now that their numpy projections are
+    # in tf_ts_ns / tf_opens. tf_frames was ~3 GiB for a 5y × 28-coin
+    # × 7-TF load; the hot loop only touches the numpy arrays. The
+    # per-coin grid5 DataFrames have already been freed above (line ~234,
+    # `del grid5` after we extracted the int64 ts array + low/high/close
+    # numpy views into coin_meta[c]["grid5_*"]).
+    tf_frames.clear()
+    import gc as _gc
+    _gc.collect()
+
     # ── Master timeline = union of all coins' kucoin5 indices ────────
+    # Old path: sorted(set().union(*indices)) — materialised ~14M Python
+    #   pd.Timestamp objects (~1.1 GiB) + a ~1 GiB Python set + a sorted
+    #   Python list. Peak ~3-4 GiB just to build a 4 MB int64 array.
+    # New path: np.concatenate + np.unique on the already-extracted i8
+    #   nanosecond arrays — pure C, ~200 MB peak (one i8 array of ~14M
+    #   entries before unique; ~6M after dedupe = ~50 MB).
     _t0 = _time.monotonic()
-    all_idx = pd.DatetimeIndex(
-        sorted(set().union(*[coin_meta[c]["grid5"].index for c in active]))
+    _ns_concat = np.concatenate(
+        [coin_meta[c]["grid5_ts_ns"] for c in active]
     )
+    _ns_unique = np.unique(_ns_concat)  # sorted + deduplicated in C
+    del _ns_concat
+    all_idx = pd.DatetimeIndex(_ns_unique.view("datetime64[ns]"), tz="UTC")
+    del _ns_unique
     if cfg.from_date is not None:
         all_idx = all_idx[all_idx >= cfg.from_date]
     if cfg.until is not None:
         all_idx = all_idx[all_idx <= cfg.until]
     _log(f"master grid: {len(all_idx):,} bars  "
          f"{_iso(all_idx[0])} → {_iso(all_idx[-1])}  "
-         f"(built in {_time.monotonic() - _t0:.1f}s)")
+         f"(built in {_time.monotonic() - _t0:.1f}s)  "
+         f"rss={_rss_mib():.0f} MiB")
 
     # ── Trader / exchange / per-coin thinker state ───────────────────
     pt_trader.TRADE_START_LEVEL = int(cfg.params.trade_start_level)
@@ -317,6 +373,27 @@ def run_portfolio(
     resume_skip_until_ts: float = 0.0
     bars_resumed = 0
     _ckpt = _load_checkpoint(run_id)
+    # Param signature for this run; compared to the checkpoint's stored
+    # signature so we never silently resume a checkpoint produced by a
+    # different (lvl, alloc, pm) combo.
+    _cur_params_sig = (
+        int(cfg.params.trade_start_level),
+        float(cfg.params.start_allocation_pct),
+        float(cfg.params.pm_start_pct),
+    )
+    if _ckpt is not None:
+        _ckpt_sig = _ckpt.get("params_sig")
+        if _ckpt_sig is not None and tuple(_ckpt_sig) != _cur_params_sig:
+            _log(f"checkpoint params {tuple(_ckpt_sig)} != current "
+                 f"{_cur_params_sig}; ignoring stale checkpoint and "
+                 f"starting fresh")
+            _ckpt = None
+        elif _ckpt_sig is None:
+            # Legacy checkpoint without a sig — could be any params. Refuse
+            # to resume rather than risk a state-trajectory mismatch.
+            _log("checkpoint has no params_sig (pre-fix); ignoring it and "
+                 "starting fresh")
+            _ckpt = None
     if _ckpt is not None:
         try:
             ex.load_state(_ckpt["exchange"])
@@ -346,6 +423,49 @@ def run_portfolio(
             series = []
             resume_skip_until_ts = 0.0
 
+    # ── Numba JIT warmup ──────────────────────────────────────────────
+    # Even with @njit(cache=True), a fresh worker process pays per-process
+    # LLVM init + cache-load cost on the first call to each njit function.
+    # For the 4 thinker.py kernels (score_tf, compute_tf_prices,
+    # rebuild_bounds, vote_one) that's ~30-40 s × 4 of CPU and a
+    # multi-GB transient peak from LLVM IR + code-gen buffers — all
+    # happening synchronously inside what would otherwise be bar 0,
+    # tripping the 120-s watchdog and blowing through the Ray OOM-monitor
+    # ceiling on parallel sweeps.
+    #
+    # Call each kernel here with a tiny representative input so all four
+    # compilations happen in a controlled phase that we log and time.
+    # The hot loop then hits already-warm functions.
+    _warm_t0 = _time.monotonic()
+    _warm_rss0 = _rss_mib()
+    try:
+        # Build a one-row ParsedTFMemory and a 1-element bound state.
+        _warm_td = bt_thinker.parse_tf_training_data({
+            "memories": "0.0{}0.0{}0.0",
+            "weights": "1.0",
+            "weights_high": "1.0",
+            "weights_low": "1.0",
+            "threshold": 1.0,
+        })
+        # 1 — score_tf
+        _hd, _ld, _st = bt_thinker.score_tf(_warm_td, 100.0, 100.5)
+        # 2 — compute_tf_prices
+        _ht, _lt = bt_thinker.compute_tf_prices(100.0, _hd, _ld, _st)
+        # 3 — rebuild_bounds (needs at least 2 TFs to exercise the
+        #     gap-walk and original-order restoration)
+        _hb, _lb = bt_thinker.rebuild_bounds(
+            [100.5, 100.6], [99.5, 99.4], ["active", "active"],
+        )
+        # 4 — vote_one
+        _v = bt_thinker.vote_one(100.0, _hb[0], _lb[0], 100.5, 99.5)
+        _log(f"numba JIT warmup done in {_time.monotonic() - _warm_t0:.1f}s  "
+             f"rss {_warm_rss0:.0f} → {_rss_mib():.0f} MiB")
+    except Exception as _e:
+        # Non-fatal — if warmup fails for any reason, the main loop will
+        # still trigger compilation on bar 0 (the old behaviour).
+        _log(f"numba JIT warmup failed ({type(_e).__name__}: {_e}); "
+             f"first bar will compile inline")
+
     # ── Daemon watchdog ──────────────────────────────────────────────
     _progress = [_time.monotonic(), 0]  # [last_progress, bar_idx]
     _watchdog_stop = threading.Event()
@@ -361,7 +481,6 @@ def run_portfolio(
     _heartbeat_every = 1000
     _walk_t0 = _time.monotonic()
     _last_log_step = 0
-    _walk_t0_reset = False
     # Sliding window of (processed_bars, monotonic_time) over the last
     # 100 heartbeats = last ~100,000 processed bars. ETA derived from
     # the window gives a far more accurate projection in full-history
@@ -369,32 +488,44 @@ def run_portfolio(
     # a global average underestimates the time still to come.
     _rate_window: deque = deque(maxlen=100)
     _rate_window.append((0, _walk_t0))
-    for step, T_pd in enumerate(all_idx):
+
+    # ── Resume fast-path ──────────────────────────────────────────────
+    # Old behaviour: enumerate(all_idx) from the start, `continue` for
+    # every already-walked bar. For a resume at e.g. bar 20,737 that's
+    # 20,737 Python-loop iterations doing nothing — ~140s on this box,
+    # tripping the 120s watchdog the whole way. Worse, _progress[0] only
+    # updates inside the loop body PAST the continue, so the watchdog
+    # has no signal that work is happening.
+    #
+    # Fast-path: searchsorted to find the first bar AFTER the resume
+    # cutoff, then iterate from there directly. The skip-scan becomes
+    # O(log N), measured in microseconds.
+    if resume_skip_until_ts > 0:
+        _resume_pd = pd.Timestamp(resume_skip_until_ts, unit="s", tz="UTC")
+        _start_pos = int(all_idx.searchsorted(_resume_pd, side="right"))
+        bars_resumed = _start_pos
+        _walk_iter = enumerate(all_idx[_start_pos:], start=_start_pos)
+    else:
+        _walk_iter = enumerate(all_idx)
+    for step, T_pd in _walk_iter:
         T = float(T_pd.timestamp())
-        if T <= resume_skip_until_ts:
-            bars_resumed += 1
-            continue
-        if not _walk_t0_reset:
-            # On resume, the skip-scan ran through possibly millions of
-            # bars before reaching the resume point. Reset the clock here
-            # so processing-rate + eta only count work that's actually
-            # done.
-            _walk_t0 = _time.monotonic()
-            _rate_window.clear()
-            _rate_window.append((0, _walk_t0))
-            _walk_t0_reset = True
         _progress[0] = _time.monotonic()
         _progress[1] = step
 
-        # Phase 2b: cache T's int64 nanosecond value for dict lookups.
+        # T's int64 nanosecond value, cached for the per-coin binary search.
         T_ns = T_pd.value
 
         for c in active:
             meta = coin_meta[c]
             if T_ns < meta["first_ts_ns"]:
                 continue
-            idx = meta["grid5_idx_by_ns"].get(T_ns)
-            if idx is None:
+            # np.searchsorted exact-match: side='left' gives the insertion
+            # point for T_ns; if the value at that index matches, that's
+            # this coin's row index. Otherwise this T isn't a bar boundary
+            # for this coin and we skip.
+            ts_arr = meta["grid5_ts_ns"]
+            idx = int(ts_arr.searchsorted(T_ns, side="left"))
+            if idx >= len(ts_arr) or ts_arr[idx] != T_ns:
                 continue   # coin has no bar at this exact T
 
             # Epoch swap if we've crossed the boundary
@@ -551,6 +682,7 @@ def run_portfolio(
                     } for c, s in thinker_state.items()},
                     dict(cached_epoch_ts),
                     fills, series,
+                    params_sig=_cur_params_sig,
                 )
             except Exception as _e:
                 _log(f"checkpoint flush failed: {type(_e).__name__}: {_e}")
@@ -580,6 +712,7 @@ def run_portfolio(
                  f"cash=${ex._cash:,.0f} "
                  f"total=${ex._cash + sum((ex._holdings.get(c,0.0) or 0.0) * (ex._fill_prices.get(c,0.0) or 0.0) for c in active):,.0f} "
                  f"fills={len(fills)}  "
+                 f"rss={_rss_mib():.0f} MiB  "
                  f"eta={_eta_s/60:.1f}min")
 
     _watchdog_stop.set()
