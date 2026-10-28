@@ -90,8 +90,6 @@ def _load_gui_settings() -> dict:
 			return dict(_gui_settings_cache)
 
 		mtime = os.path.getmtime(_GUI_SETTINGS_PATH)
-		if _gui_settings_cache["mtime"] == mtime:
-			return dict(_gui_settings_cache)
 
 		with open(_GUI_SETTINGS_PATH, "r", encoding="utf-8") as f:
 			data = json.load(f) or {}
@@ -353,8 +351,7 @@ def _refresh_paths_and_symbols():
 	if mtime is None:
 		return
 
-	if _last_settings_mtime == mtime:
-		return
+
 
 	_last_settings_mtime = mtime
 
@@ -606,7 +603,225 @@ class CryptoAPITrading:
                 f.write(json.dumps(obj) + "\n")
         except Exception:
             pass
+    def _first_dca_min_time_block_reason(
+        self,
+        base_symbol: str,
+        now_ts: Optional[float] = None,
+    ) -> Optional[str]:
+        """
+        Enforce the configurable REAL elapsed-time wait only between the
+        initial filled BUY and the FIRST DCA of the current trade.
 
+        Once the first DCA has happened, this method imposes NO time or candle
+        spacing on later DCAs.
+
+        DCA signals seen during the waiting period are not queued or remembered.
+        The guard is evaluated only against a DCA signal that is valid right now.
+        """
+
+        base = str(base_symbol).upper().strip()
+        if not base:
+            return "invalid symbol"
+
+        min_hours = 4.0
+
+        # Read the dedicated setting directly so this remains hot-reloadable
+        # without changing the main trade loop.
+        try:
+            if os.path.isfile(_GUI_SETTINGS_PATH):
+                st = os.stat(_GUI_SETTINGS_PATH)
+                settings_sig = (
+                    int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))),
+                    int(st.st_size),
+                )
+            else:
+                settings_sig = None
+        except Exception:
+            settings_sig = None
+
+        try:
+            settings_cache = getattr(self, "_first_dca_wait_settings_cache", None)
+            if not isinstance(settings_cache, dict):
+                settings_cache = {}
+                self._first_dca_wait_settings_cache = settings_cache
+        except Exception:
+            settings_cache = {}
+
+        if settings_cache.get("sig") == settings_sig and "hours" in settings_cache:
+            try:
+                min_hours = float(settings_cache.get("hours", 4.0))
+            except Exception:
+                min_hours = 4.0
+        else:
+            try:
+                if settings_sig is not None:
+                    with open(_GUI_SETTINGS_PATH, "r", encoding="utf-8") as f:
+                        settings_data = json.load(f) or {}
+
+                    min_hours = float(
+                        settings_data.get(
+                            "min_time_initial_buy_to_first_dca_hours",
+                            4.0,
+                        )
+                    )
+                else:
+                    min_hours = 4.0
+            except Exception:
+                min_hours = 4.0
+
+            if min_hours < 0.0:
+                min_hours = 0.0
+
+            try:
+                settings_cache["sig"] = settings_sig
+                settings_cache["hours"] = float(min_hours)
+            except Exception:
+                pass
+
+        if min_hours < 0.0:
+            min_hours = 0.0
+
+        # Zero disables the initial-BUY -> first-DCA wait.
+        if min_hours <= 0.0:
+            return None
+
+        now = float(now_ts if now_ts is not None else time.time())
+
+        # Cache active-trade timing until trade_history.jsonl changes.
+        try:
+            st = os.stat(TRADE_HISTORY_PATH)
+            history_sig = (
+                int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000))),
+                int(st.st_size),
+            )
+        except Exception:
+            return "could not verify current trade timing"
+
+        try:
+            cache = getattr(self, "_first_dca_time_guard_cache", None)
+            if not isinstance(cache, dict):
+                cache = {}
+                self._first_dca_time_guard_cache = cache
+        except Exception:
+            cache = {}
+
+        cached = cache.get(base)
+
+        if cached and cached.get("sig") == history_sig:
+            trade_start_ts = cached.get("trade_start_ts")
+            has_dca = bool(cached.get("has_dca", False))
+
+        else:
+            trade_start_ts = None
+            has_dca = False
+
+            try:
+                with open(TRADE_HISTORY_PATH, "r", encoding="utf-8") as f:
+                    rows = f.readlines()
+            except Exception:
+                return "could not verify current trade timing"
+
+            current_trade_buys = []
+
+            # Walk backward through only the current trade. The first non-LTH
+            # SELL encountered for this coin ended the previous bot trade.
+            for raw in reversed(rows):
+                raw = (raw or "").strip()
+                if not raw:
+                    continue
+
+                try:
+                    obj = json.loads(raw)
+                except Exception:
+                    continue
+
+                symbol_full = str(obj.get("symbol", "")).upper().strip()
+                row_base = symbol_full.split("-")[0].strip() if symbol_full else ""
+
+                if row_base != base:
+                    continue
+
+                side = str(obj.get("side", "")).lower().strip()
+                tag = str(obj.get("tag", "") or "").upper().strip()
+
+                if tag == "LTH":
+                    continue
+
+                try:
+                    ts = float(obj.get("ts"))
+                except Exception:
+                    continue
+
+                if side == "sell":
+                    break
+
+                if side == "buy":
+                    current_trade_buys.append((ts, tag))
+
+                    if tag == "DCA":
+                        has_dca = True
+
+            # Once DCA #1 exists, there is deliberately no timing/candle
+            # restriction between later DCAs.
+            if has_dca:
+                try:
+                    cache[base] = {
+                        "sig": history_sig,
+                        "trade_start_ts": None,
+                        "has_dca": True,
+                    }
+                except Exception:
+                    pass
+
+                return None
+
+            if not current_trade_buys:
+                return "could not determine current trade start time"
+
+            # Scanned newest -> oldest, so the last BUY is the initial BUY.
+            trade_start_ts = current_trade_buys[-1][0]
+
+            try:
+                cache[base] = {
+                    "sig": history_sig,
+                    "trade_start_ts": trade_start_ts,
+                    "has_dca": False,
+                }
+            except Exception:
+                pass
+
+        if has_dca:
+            return None
+
+        if trade_start_ts is None:
+            return "could not determine current trade start time"
+
+        eligible_ts = float(trade_start_ts) + (float(min_hours) * 3600.0)
+
+        if now < eligible_ts:
+            remaining_seconds = max(0.0, eligible_ts - now)
+
+            return (
+                f"first DCA must wait {min_hours:g} real hours after the initial BUY "
+                f"({remaining_seconds / 3600.0:.2f}h remaining)"
+            )
+
+        return None
+
+    def _dca_same_1hour_candle_block_reason(
+        self,
+        base_symbol: str,
+        now_ts: Optional[float] = None,
+    ) -> Optional[str]:
+        """
+        Compatibility wrapper for the existing trade-loop call site.
+
+        The old 1-hour-candle restriction is intentionally gone.
+        """
+        return self._first_dca_min_time_block_reason(
+            base_symbol,
+            now_ts=now_ts,
+        )
     # -----------------------------
     # BOT ORDER OWNERSHIP (for long-term holdings support)
     # -----------------------------
@@ -614,6 +829,23 @@ class CryptoAPITrading:
         """Returns {"BTC": {order_id, ...}, ...}."""
         out: Dict[str, set] = {}
         try:
+            lth_ids = set()
+            if os.path.isfile(TRADE_HISTORY_PATH):
+                with open(TRADE_HISTORY_PATH, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = (line or "").strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except Exception:
+                            continue
+                        if str(obj.get("tag") or "").upper().strip() != "LTH":
+                            continue
+                        oid = str(obj.get("order_id") or "").strip()
+                        if oid:
+                            lth_ids.add(oid)
+
             raw = self._atomic_read_json(BOT_ORDER_IDS_PATH) or {}
             if not isinstance(raw, dict):
                 raw = {}
@@ -622,9 +854,9 @@ class CryptoAPITrading:
                 if not sym:
                     continue
                 if isinstance(v, list):
-                    out[sym] = {str(x).strip() for x in v if str(x).strip()}
+                    out[sym] = {str(x).strip() for x in v if str(x).strip() and str(x).strip() not in lth_ids}
                 elif isinstance(v, set):
-                    out[sym] = set(v)
+                    out[sym] = {str(x).strip() for x in v if str(x).strip() and str(x).strip() not in lth_ids}
         except Exception:
             pass
         return out
@@ -633,10 +865,27 @@ class CryptoAPITrading:
         try:
             data: Dict[str, list] = {}
             for sym, ids in (self._bot_order_ids or {}).items():
-                if not sym or not ids:
+                sym_u = str(sym).upper().strip()
+                if not sym_u:
                     continue
-                data[str(sym).upper().strip()] = sorted({str(x).strip() for x in ids if str(x).strip()})
+
+                # IMPORTANT: keep empty lists.
+                # {"BNB": []} is not the same thing as "BNB key missing":
+                #   key present + []  => user explicitly selected NONE; all current BNB is LTH/manual
+                #   key missing       => no Hub decision is available; history may be used for recovery
+                try:
+                    cleaned_ids = sorted({str(x).strip() for x in (ids or set()) if str(x).strip()})
+                except Exception:
+                    cleaned_ids = []
+
+                data[sym_u] = cleaned_ids
+
             self._atomic_write_json(BOT_ORDER_IDS_PATH, data)
+
+            try:
+                self._bot_order_ids_mtime = os.path.getmtime(BOT_ORDER_IDS_PATH) if os.path.isfile(BOT_ORDER_IDS_PATH) else None
+            except Exception:
+                self._bot_order_ids_mtime = None
         except Exception:
             pass
 
@@ -668,6 +917,9 @@ class CryptoAPITrading:
                     try:
                         obj = json.loads(line)
                     except Exception:
+                        continue
+
+                    if str(obj.get("tag") or "").upper().strip() == "LTH":
                         continue
 
                     side = str(obj.get("side", "")).lower().strip()
@@ -733,28 +985,45 @@ class CryptoAPITrading:
             pass
 
     def _clear_bot_order_ids_for_coin(self, base_symbol: str) -> None:
-        """Clear the tracked order_ids for the current open trade on this coin (called after a filled bot SELL)."""
+        """Clear tracked current-trade order_ids for this coin."""
         try:
             base = str(base_symbol).upper().strip()
             if not base:
                 return
+
             if isinstance(self._bot_order_ids, dict):
                 self._bot_order_ids.pop(base, None)
+
+            # Also clear the runtime history cache so stale completed-trade buys
+            # cannot leak into the next fresh trade before the next restart/reload.
+            if isinstance(getattr(self, "_bot_order_ids_from_history", None), dict):
+                self._bot_order_ids_from_history.pop(base, None)
+
             self._save_bot_order_ids()
         except Exception:
             pass
 
 
     def _is_bot_order_id(self, base_symbol: str, order_id: Optional[str]) -> bool:
+        """
+        Return True ONLY when order_id is in the Hub's saved selection for this coin.
+
+        trade_history.jsonl is intentionally NOT an ownership fallback here.
+        The most recent Hub picker selection is the source of truth.
+        """
         base = str(base_symbol).upper().strip()
         oid = str(order_id or "").strip()
         if not base or not oid:
             return False
-        if oid in (self._bot_order_ids.get(base, set()) if isinstance(self._bot_order_ids, dict) else set()):
-            return True
-        if oid in (self._bot_order_ids_from_history.get(base, set()) if isinstance(self._bot_order_ids_from_history, dict) else set()):
-            return True
-        return False
+
+        try:
+            if not isinstance(self._bot_order_ids, dict):
+                return False
+
+            selected_ids = set(self._bot_order_ids.get(base, set()) or set())
+            return oid in selected_ids
+        except Exception:
+            return False
     def _maybe_reload_bot_order_ids(self) -> bool:
         """
         If the GUI updates bot_order_ids.json while the trader is running,
@@ -875,7 +1144,18 @@ class CryptoAPITrading:
         out = {}
         try:
             payload = self._atomic_read_json(LTH_EMA200_PATH) or {}
-            coins = payload.get("coins", {}) if isinstance(payload, dict) else {}
+            if not isinstance(payload, dict):
+                return out
+
+            try:
+                snapshot_ts = float(payload.get("ts", 0.0) or 0.0)
+            except Exception:
+                snapshot_ts = 0.0
+
+            if snapshot_ts <= 0.0 or abs(time.time() - snapshot_ts) > 300.0:
+                return out
+
+            coins = payload.get("coins", {})
             if not isinstance(coins, dict):
                 return out
             for sym, row in coins.items():
@@ -889,6 +1169,8 @@ class CryptoAPITrading:
                     pct_f = float(pct)
                 except Exception:
                     continue
+                if not math.isfinite(pct_f):
+                    continue
                 out[s] = pct_f
         except Exception:
             pass
@@ -896,35 +1178,145 @@ class CryptoAPITrading:
 
     def _pick_lth_symbol_to_buy(self) -> Optional[str]:
         """
-        Pick the coin from LONG_TERM_SYMBOLS that is furthest % below daily 200 EMA.
-        If none are below (pct>=0), pick the one closest to EMA (smallest positive pct).
-        Returns base symbol like "BTC" or None.
+        Pick the LTH coin that is furthest below daily EMA200.
+
+        IMPORTANT:
+        Every configured LTH coin MUST have a current valid percentage.
+
+        We do NOT allow a partial snapshot to bias the choice toward whichever
+        single coin happened to calculate successfully.
         """
+
         try:
-            syms = sorted({str(x).upper().strip() for x in (LONG_TERM_SYMBOLS or set()) if str(x).strip()})
+            syms = sorted({
+                str(x).upper().strip()
+                for x in (
+                    LONG_TERM_SYMBOLS
+                    or set()
+                )
+                if str(x).strip()
+            })
+
+
             if not syms:
                 return None
 
-            pct_map = self._read_lth_ema200_snapshot()
-            scored = []
-            for s in syms:
-                if s in pct_map:
-                    scored.append((float(pct_map[s]), s))
 
-            if not scored:
-                # no EMA snapshot yet; just pick first configured symbol
-                return syms[0]
+            pct_map = (
+                self._read_lth_ema200_snapshot()
+            )
 
-            # Most negative = furthest below EMA200
-            below = [(pct, s) for (pct, s) in scored if pct < 0.0]
+
+            # --------------------------------------------------------
+            # CRITICAL:
+            # Do not buy anything if the comparison is incomplete.
+            #
+            # Example of old bad behavior:
+            #
+            # configured:
+            # BTC ETH BNB SOL XRP
+            #
+            # snapshot:
+            # BNB only
+            #
+            # old code:
+            # -> BNB wins because it is the only candidate
+            #
+            # new code:
+            # -> NO BUY until all percentages are available
+            # --------------------------------------------------------
+
+            missing = [
+                s
+                for s in syms
+                if s not in pct_map
+            ]
+
+
+            if missing:
+
+                print(
+                    "[LTH] Skipping LTH purchase because EMA200 "
+                    "comparison is incomplete. Missing: "
+                    +
+                    ", ".join(missing)
+                )
+
+                return None
+
+
+            scored = [
+                (
+                    float(
+                        pct_map[s]
+                    ),
+                    s,
+                )
+                for s in syms
+            ]
+
+
+            # --------------------------------------------------------
+            # Anything below EMA200?
+            #
+            # Most negative wins.
+            #
+            # -20% beats -10%
+            # -10% beats -2%
+            # --------------------------------------------------------
+
+            below = [
+                (
+                    pct,
+                    sym
+                )
+                for pct, sym
+                in scored
+                if pct < 0.0
+            ]
+
+
             if below:
-                below.sort(key=lambda t: t[0])  # most negative first
-                return below[0][1]
 
-            # None below: pick smallest positive (closest above EMA200)
-            scored.sort(key=lambda t: abs(t[0]))
-            return scored[0][1]
-        except Exception:
+                below.sort(
+                    key=lambda t:
+                        t[0]
+                )
+
+                chosen_pct, chosen_sym = (
+                    below[0]
+                )
+
+
+            else:
+
+                # Nothing below EMA200.
+                # Pick the coin closest to EMA200.
+                scored.sort(
+                    key=lambda t:
+                        abs(t[0])
+                )
+
+                chosen_pct, chosen_sym = (
+                    scored[0]
+                )
+
+
+            print(
+                f"[LTH] Selected {chosen_sym}: "
+                f"{chosen_pct:+.2f}% vs EMA200"
+            )
+
+
+            return chosen_sym
+
+
+        except Exception as e:
+
+            print(
+                f"[LTH] Could not choose LTH coin: {e}"
+            )
+
             return None
 
     def _lth_market_buy_for_usd(self, base_symbol: str, usd_amount: float) -> bool:
@@ -1061,14 +1453,15 @@ class CryptoAPITrading:
     # -----------------------------
     # Ledger seeding from selected bot order IDs
     # -----------------------------
-    def _rebuild_open_position_from_selected_bot_buys(self, base_symbol: str, tradable_qty: float) -> None:
+    def _rebuild_open_position_from_selected_bot_buys(self, base_symbol: str, total_holding_qty: float) -> None:
         """
-        Rebuild self._pnl_ledger["open_positions"][SYM] from the *selected bot BUY orders* (order IDs),
-        ignoring ANY intervening manual orders (buys/sells) that are not bot-owned.
+        Rebuild open_positions[SYM] from the Hub-selected filled BUY orders ONLY.
 
-        This is the missing piece that fixes:
-          - avg entry / cost basis ignoring selected buys that happened before an unrelated sell
-          - avg entry reflecting only buys recorded since this process started
+        Rules:
+          - selected_ids == empty -> bot owns ZERO of this coin; clear stale ledger entry
+          - selected_ids != empty -> rebuild only from those exact selected BUY IDs
+          - trade_history.jsonl is NOT consulted for ownership
+          - anything in live holdings beyond rebuilt bot qty is LTH/manual
         """
         try:
             sym = str(base_symbol).upper().strip()
@@ -1076,126 +1469,177 @@ class CryptoAPITrading:
                 return
 
             try:
-                tradable_qty = float(tradable_qty or 0.0)
+                total_holding_qty = float(total_holding_qty or 0.0)
             except Exception:
-                tradable_qty = 0.0
-            if tradable_qty < 0.0:
-                tradable_qty = 0.0
+                total_holding_qty = 0.0
 
-            # If we have no bot IDs for this coin, we can't rebuild anything.
-            has_any_ids = False
+            if total_holding_qty < 0.0:
+                total_holding_qty = 0.0
+
             try:
-                if sym in (self._bot_order_ids or {}) and (self._bot_order_ids.get(sym) or set()):
-                    has_any_ids = True
-                if sym in (self._bot_order_ids_from_history or {}) and (self._bot_order_ids_from_history.get(sym) or set()):
-                    has_any_ids = True
+                selected_ids = set(self._bot_order_ids.get(sym, set()) or set())
             except Exception:
-                has_any_ids = False
+                selected_ids = set()
 
-            if not has_any_ids:
+            # The Hub just said "Select None": clear this coin BEFORE any API
+            # lookup so an old ledger entry can never survive the decision.
+            if not selected_ids:
+                self._pnl_ledger.setdefault("open_positions", {}).pop(sym, None)
+                self._save_pnl_ledger()
                 return
 
-            # Pull orders and keep ONLY filled bot-owned BUY orders.
+            # No live holdings means there cannot be an active bot position.
+            if total_holding_qty <= 0.0:
+                self._pnl_ledger.setdefault("open_positions", {}).pop(sym, None)
+                self._save_pnl_ledger()
+                return
+
             symbol_full = f"{sym}-USD"
             orders = self.get_orders(symbol_full)
             results = orders.get("results", []) if isinstance(orders, dict) else []
+
+            # If Robinhood did not return a usable order list, do not manufacture
+            # ownership from history or from the stale ledger.
             if not isinstance(results, list) or not results:
                 return
 
             buys = []
+
             for o in results:
                 try:
-                    if str(o.get("state", "")).lower() != "filled":
+                    if str(o.get("state", "")).lower().strip() != "filled":
                         continue
-                    if str(o.get("side", "")).lower() != "buy":
+
+                    if str(o.get("side", "")).lower().strip() != "buy":
                         continue
+
                     oid = str(o.get("id") or "").strip()
-                    if not oid:
-                        continue
-                    if not self._is_bot_order_id(sym, oid):
+
+                    # ONLY what the Hub picker selected.
+                    if not oid or oid not in selected_ids:
                         continue
 
                     qty, avg_px, notional_usd, fees_usd = self._extract_amounts_and_fees_from_order(o)
                     qty = float(qty or 0.0)
+
                     if qty <= 0.0:
                         continue
 
-                    # Prefer true notional; otherwise compute from avg price.
                     if notional_usd is None or float(notional_usd or 0.0) <= 0.0:
                         if avg_px is None or float(avg_px or 0.0) <= 0.0:
                             continue
+
                         notional_usd = float(avg_px) * qty
 
                     fees = float(fees_usd or 0.0)
                     cost = float(notional_usd) + fees
-
                     created = str(o.get("created_at") or "")
-                    buys.append((created, qty, cost))
+
+                    buys.append(
+                        (
+                            created,
+                            qty,
+                            cost,
+                        )
+                    )
+
                 except Exception:
                     continue
 
+            # A valid order response was received, but none of the currently
+            # selected IDs resolved to filled BUYs. Therefore there is no
+            # rebuildable autotrade position from THIS selection.
             if not buys:
-                return
-
-            # Oldest -> newest for deterministic FIFO-style trimming to tradable_qty
-            buys.sort(key=lambda x: x[0] or "")
-
-            # If tradable_qty is 0, clear ledger position for this coin.
-            if tradable_qty <= 0.0:
                 self._pnl_ledger.setdefault("open_positions", {}).pop(sym, None)
                 self._save_pnl_ledger()
                 return
 
+            buys.sort(
+                key=lambda x: x[0] or ""
+            )
+
+            # Selected BUY quantities define bot ownership.
+            # Never claim more than the account actually holds right now.
             qty_used = 0.0
             cost_used = 0.0
+
             for _, q, c in buys:
-                if qty_used >= tradable_qty - 1e-12:
+
+                if qty_used >= total_holding_qty - 1e-12:
                     break
-                remaining = tradable_qty - qty_used
+
+                remaining = (
+                    total_holding_qty
+                    -
+                    qty_used
+                )
+
                 if q <= remaining + 1e-12:
+
                     qty_used += q
                     cost_used += c
+
                 else:
-                    # Partial fill usage of this order’s lot
-                    ratio = remaining / q if q > 0 else 0.0
+
+                    ratio = (
+                        remaining / q
+                        if q > 0.0
+                        else 0.0
+                    )
+
                     qty_used += remaining
-                    cost_used += (c * ratio)
+                    cost_used += (
+                        c
+                        *
+                        ratio
+                    )
 
             if qty_used <= 0.0:
-                self._pnl_ledger.setdefault("open_positions", {}).pop(sym, None)
+
+                self._pnl_ledger.setdefault(
+                    "open_positions",
+                    {},
+                ).pop(
+                    sym,
+                    None,
+                )
+
                 self._save_pnl_ledger()
+
                 return
 
-            self._pnl_ledger.setdefault("open_positions", {})[sym] = {
+            self._pnl_ledger.setdefault(
+                "open_positions",
+                {},
+            )[sym] = {
                 "qty": float(qty_used),
                 "usd_cost": float(cost_used),
             }
+
             self._save_pnl_ledger()
+
         except Exception:
             pass
 
 
     def _bot_net_qty_from_selected_orders(self, base_symbol: str) -> float:
         """
-        Compute the bot's current *in-trade* qty for a coin for the current trade:
+        Compute bot-owned quantity from the Hub-selected BUY order IDs ONLY.
 
-        IMPORTANT:
-          - The GUI selection popup includes ONLY the bot's START BUY + DCA BUY orders.
-          - The user does NOT select sell orders.
-
-        Therefore:
-          selected_buys_qty = sum(filled BUY qty for order IDs in bot_order_ids.json)
-          bot_sells_qty      = sum(filled SELL qty for bot-owned orders from trade_history.jsonl)
-                              (restricted to sells that occurred after the earliest selected buy)
-
-          in_trade_qty = max(0, selected_buys_qty - bot_sells_qty)
-
-        This stays independent of total exchange holdings; any leftover beyond in_trade_qty
-        is treated as long-term/manual.
+        No trade-history fallback is used. If the Hub selected none for this
+        coin, bot-owned quantity is exactly zero.
         """
         try:
             sym = str(base_symbol).upper().strip()
             if not sym or sym == "USDC":
+                return 0.0
+
+            try:
+                selected_ids = set(self._bot_order_ids.get(sym, set()) or set())
+            except Exception:
+                selected_ids = set()
+
+            if not selected_ids:
                 return 0.0
 
             symbol_full = f"{sym}-USD"
@@ -1204,79 +1648,28 @@ class CryptoAPITrading:
             if not isinstance(results, list) or not results:
                 return 0.0
 
-            # Selected BUY order IDs (from GUI) are in self._bot_order_ids[sym]
-            selected_ids = set()
-            try:
-                selected_ids = set(self._bot_order_ids.get(sym, set()) or set())
-            except Exception:
-                selected_ids = set()
-
-            # Bot-owned history IDs (from trade_history.jsonl) are in self._bot_order_ids_from_history[sym]
-            hist_ids = set()
-            try:
-                hist_ids = set(self._bot_order_ids_from_history.get(sym, set()) or set())
-            except Exception:
-                hist_ids = set()
-
-            # Pass 1: sum selected BUY fills and find earliest selected BUY created_at
             selected_buy_qty = 0.0
-            earliest_selected_buy_created = None
-
-            # We also cache filled sells (created_at, qty) to apply the earliest-selected-buy cutoff
-            filled_bot_sells = []
 
             for o in results:
                 try:
-                    if str(o.get("state", "")).lower() != "filled":
+                    if str(o.get("state", "")).lower().strip() != "filled":
+                        continue
+                    if str(o.get("side", "")).lower().strip() != "buy":
                         continue
 
                     oid = str(o.get("id") or "").strip()
-                    if not oid:
+                    if not oid or oid not in selected_ids:
                         continue
 
-                    side = str(o.get("side") or "").lower().strip()
                     qty, _avg = self._extract_fill_from_order(o)
-                    try:
-                        qty = float(qty or 0.0)
-                    except Exception:
-                        qty = 0.0
-                    if qty <= 0.0:
-                        continue
+                    qty = float(qty or 0.0)
 
-                    created = str(o.get("created_at") or "")
-
-                    # Selected orders are BUY-only
-                    if side == "buy" and oid in selected_ids:
+                    if qty > 0.0:
                         selected_buy_qty += qty
-                        if created:
-                            if earliest_selected_buy_created is None or created < earliest_selected_buy_created:
-                                earliest_selected_buy_created = created
-
-                    # Sells are NOT selected; infer bot sells from history IDs
-                    if side == "sell" and oid in hist_ids:
-                        filled_bot_sells.append((created, qty))
                 except Exception:
                     continue
 
-            # If the user selected no buys, bot owns zero in-trade qty for this coin.
-            if selected_buy_qty <= 0.0:
-                return 0.0
-
-            # Pass 2: subtract bot sells that occurred after the earliest selected buy
-            bot_sell_qty = 0.0
-            cutoff = earliest_selected_buy_created
-            for created, qty in filled_bot_sells:
-                try:
-                    if cutoff and created and created < cutoff:
-                        continue
-                    bot_sell_qty += float(qty or 0.0)
-                except Exception:
-                    continue
-
-            net = float(selected_buy_qty) - float(bot_sell_qty)
-            if net < 0.0:
-                net = 0.0
-            return float(net)
+            return max(0.0, float(selected_buy_qty))
         except Exception:
             return 0.0
 
@@ -1284,13 +1677,10 @@ class CryptoAPITrading:
 
     def _seed_open_positions_from_selected_orders(self, holdings_list: list) -> None:
         """
-        Seed/re-seed open_positions from selected bot order IDs for all held assets.
+        Re-seed open_positions from the Hub's current selections.
 
-        The bot-owned (in-trade) qty is computed ONLY from selected bot orders:
-          in_trade_qty = filled_bot_buys_qty - filled_bot_sells_qty
-
-        Long-term/manual qty is automatic:
-          long_term_qty = max(0, total_exchange_qty - in_trade_qty)
+        For every currently-held asset, the rebuild function receives the full
+        live holding quantity and decides bot ownership from selected BUY IDs only.
         """
         try:
             if not isinstance(holdings_list, list):
@@ -1299,26 +1689,36 @@ class CryptoAPITrading:
             for h in holdings_list:
                 try:
                     asset = str(h.get("asset_code", "")).upper().strip()
+
                     if not asset or asset == "USDC":
                         continue
 
                     try:
-                        total_qty = float(h.get("total_quantity", 0.0) or 0.0)
+                        total_qty = float(
+                            h.get(
+                                "total_quantity",
+                                0.0,
+                            )
+                            or 0.0
+                        )
                     except Exception:
                         total_qty = 0.0
+
                     if total_qty < 0.0:
                         total_qty = 0.0
 
-                    in_trade_qty = self._bot_net_qty_from_selected_orders(asset)
+                    # Give the rebuilder the REAL currently-held quantity.
+                    #
+                    # The rebuilder itself decides bot ownership strictly from
+                    # whatever BUY IDs were selected in the Hub popup.
+                    self._rebuild_open_position_from_selected_bot_buys(
+                        asset,
+                        total_qty,
+                    )
 
-                    # Never claim more bot inventory than actually exists in holdings.
-                    tradable_qty = min(float(total_qty), float(in_trade_qty))
-                    if tradable_qty < 0.0:
-                        tradable_qty = 0.0
-
-                    self._rebuild_open_position_from_selected_bot_buys(asset, tradable_qty)
                 except Exception:
                     continue
+
         except Exception:
             pass
 
@@ -2641,28 +3041,25 @@ class CryptoAPITrading:
                             order_id=order_id,
                         )
 
-                        # This filled BUY now belongs to the bot's CURRENT trade for this coin.
-                        # Persist the order id immediately so restarts/order-selection recovery
-                        # have the correct current-trade anchor.
-                        try:
-                            base_symbol = str(symbol).upper().split("-")[0].strip()
-                            self._mark_bot_order_id(base_symbol, order_id)
-                        except Exception:
-                            pass
+                        if str(tag or "").upper().strip() != "LTH":
+                            # This filled BUY now belongs to the bot's CURRENT trade for this coin.
+                            # Persist the order id immediately so restarts/order-selection recovery
+                            # have the correct current-trade anchor.
+                            try:
+                                base_symbol = str(symbol).upper().split("-")[0].strip()
+                                self._mark_bot_order_id(base_symbol, order_id)
+                            except Exception:
+                                pass
 
-                        # Maintain DCA stage in memory during normal runtime.
-                        # Fresh initial trade buy -> stage 0
-                        # Actual DCA fill       -> increment by one
-                        try:
-                            base_symbol = str(symbol).upper().split("-")[0].strip()
-                            if str(tag or "").upper().strip() == "DCA":
-                                current_levels = list(self.dca_levels_triggered.get(base_symbol, []) or [])
-                                current_levels.append(len(current_levels))
-                                self.dca_levels_triggered[base_symbol] = current_levels
-                            else:
-                                self.dca_levels_triggered[base_symbol] = []
-                        except Exception:
-                            pass
+                            # Maintain DCA stage from the current trade's BUY count.
+                            # 1 filled BUY = DCA stage 0, 2 filled BUYs = stage 1, etc.
+                            try:
+                                base_symbol = str(symbol).upper().split("-")[0].strip()
+                                selected_buy_ids = set(self._bot_order_ids.get(base_symbol, set()) or set())
+                                triggered_levels_count = max(0, len(selected_buy_ids) - 1)
+                                self.dca_levels_triggered[base_symbol] = list(range(triggered_levels_count))
+                            except Exception:
+                                pass
 
                         # Clear pending now that it is recorded
                         try:
@@ -2691,9 +3088,6 @@ class CryptoAPITrading:
                         return None
 
         return None
-
-
-
 
     def place_sell_order(
         self,
@@ -2922,25 +3316,41 @@ class CryptoAPITrading:
             holdings_list = []
             snapshot_ok = False
 
-        # IMPORTANT: seed bot open_positions from the selected bot order IDs (Hub picker).
-        # This makes avg entry/cost basis include selected buys even if they occurred before
-        # unrelated manual sells in the account history.
+        # IMPORTANT: seed bot open_positions from the exact BUY order IDs
+        # selected in the Hub picker.
         #
-        # FIX (DCA stage stuck at 0 after restart):
-        # initialize_dca_levels() depends on pnl_ledger["open_positions"][SYM]["qty"] to decide whether
-        # the bot is "in trade" for that coin. That ledger is seeded here, so we MUST re-run
-        # initialize_dca_levels() immediately after seeding; otherwise DCA stages remain [] (0) in the GUI.
+        # Do NOT mark the rebuild complete until Robinhood has actually
+        # returned a valid holdings list.
         try:
             if getattr(self, "_needs_ledger_seed_from_orders", False):
-                self._seed_open_positions_from_selected_orders(holdings_list)
 
-                # Now that open_positions is seeded, rebuild per-coin DCA stage counts from bot-owned order history.
-                try:
-                    self.initialize_dca_levels()
-                except Exception:
-                    pass
+                holdings_payload_valid = (
+                    isinstance(holdings, dict)
+                    and
+                    isinstance(
+                        holdings.get(
+                            "results",
+                            None,
+                        ),
+                        list,
+                    )
+                )
 
-                self._needs_ledger_seed_from_orders = False
+                if holdings_payload_valid:
+
+                    self._seed_open_positions_from_selected_orders(
+                        holdings_list
+                    )
+
+                    # Rebuild DCA stage counts AFTER the selected-order ledger
+                    # has been rebuilt from the real holdings payload.
+                    try:
+                        self.initialize_dca_levels()
+                    except Exception:
+                        pass
+
+                    self._needs_ledger_seed_from_orders = False
+
         except Exception:
             pass
 
@@ -3235,7 +3645,8 @@ class CryptoAPITrading:
             # Neural DCA applies to the levels BELOW the trade-start level.
             # Example: trade_start_level=3 => stages 0..3 map to N4..N7 (4 total).
             start_level = max(1, min(int(TRADE_START_LEVEL or 3), 7))
-            neural_dca_max = max(0, 7 - start_level)
+            symbol_on_trade_list = symbol in {str(s).upper().strip() for s in crypto_symbols}
+            neural_dca_max = max(0, 7 - start_level) if symbol_on_trade_list else 0
 
             if next_stage < neural_dca_max:
                 neural_next = start_level + 1 + next_stage
@@ -3481,7 +3892,7 @@ class CryptoAPITrading:
 
             # How many neural DCA stages exist above the start level?
             # Example: start_level=4 -> neural DCAs can be at 5,6,7 => 3 stages
-            neural_dca_max = max(0, 7 - start_level)
+            neural_dca_max = max(0, 7 - start_level) if symbol_on_trade_list else 0
 
             current_stage = len(self.dca_levels_triggered.get(symbol, []))
 
@@ -3520,7 +3931,21 @@ class CryptoAPITrading:
                     and (current_buy_price <= neural_line_price)
                 )
 
-            if hard_hit or neural_hit:
+
+            # A DCA must be a valid DCA RIGHT NOW.
+            # Nothing gets queued from an earlier candle.
+            dca_signal_now = bool(hard_hit or neural_hit)
+
+            if dca_signal_now:
+                candle_block_reason = self._dca_same_1hour_candle_block_reason(symbol)
+
+                if candle_block_reason:
+                    print(
+                        f"  Skipping DCA for {symbol}: {candle_block_reason}. "
+                        f"Signal is NOT queued."
+                    )
+                    continue
+
                 if neural_hit and hard_hit:
                     reason = (
                         f"NEURAL L{neural_level_now}>=L{neural_level_needed} "
@@ -3684,8 +4109,28 @@ class CryptoAPITrading:
 
 
 
+            # Fresh trade must start from a totally clean per-coin current-trade state
+            # BEFORE the new start BUY gets marked as the only current-trade order.
+            try:
+                self._clear_bot_order_ids_for_coin(base_symbol)
+            except Exception:
+                pass
+
+            try:
+                self._pnl_ledger.setdefault("open_positions", {}).pop(base_symbol, None)
+                self._save_pnl_ledger()
+            except Exception:
+                pass
+
             self.dca_levels_triggered[base_symbol] = []
+            self._reset_dca_window_for_trade(base_symbol, sold=False)
             self.trailing_pm.pop(base_symbol, None)
+
+            try:
+                if isinstance(self.cost_basis, dict):
+                    self.cost_basis[base_symbol] = 0.0
+            except Exception:
+                pass
 
             response = self.place_buy_order(
                 str(uuid.uuid4()),
@@ -3697,7 +4142,8 @@ class CryptoAPITrading:
 
             if response and "errors" not in response:
                 trades_made = True
-                # Do NOT pre-trigger any DCA levels. Hardcoded DCA will mark levels only when it hits your loss thresholds.
+
+                # Filled start BUY = exactly one current-trade buy, so DCA stage is 0.
                 self.dca_levels_triggered[base_symbol] = []
 
                 # Fresh trade -> clear any rolling 24h DCA window for this coin
@@ -3705,6 +4151,19 @@ class CryptoAPITrading:
 
                 # Reset trailing PM state for this coin (fresh trade, fresh trailing logic)
                 self.trailing_pm.pop(base_symbol, None)
+
+                # This status payload may have been built before the start BUY happened.
+                # Force same-iteration GUI display to stage 0 instead of any stale value.
+                try:
+                    if base_symbol in positions:
+                        positions[base_symbol]["dca_triggered_stages"] = 0
+                        positions[base_symbol]["next_dca_display"] = ""
+                        positions[base_symbol]["trail_active"] = False
+                        positions[base_symbol]["trail_line"] = 0.0
+                        positions[base_symbol]["trail_peak"] = 0.0
+                        positions[base_symbol]["dist_to_trail_pct"] = 0.0
+                except Exception:
+                    pass
 
 
                 print(

@@ -235,11 +235,11 @@ def restart_program():
 	os.execl(python, python, * sys.argv)
 try:
 	if restarted_yet > 2:
-		restarted_yet = 0
+		restarted_yet = 1
 	else:	
 		pass
 except:
-	restarted_yet = 0
+	restarted_yet = 1
 tf_choices = ['1hour', '2hour', '4hour', '8hour', '12hour', '1day', '1week']
 tf_minutes = [60, 120, 240, 480, 720, 1440, 10080]
 # --- GUI HUB INPUT (NO PROMPTS) ---
@@ -449,13 +449,7 @@ while True:
 			break
 		else:
 			continue
-	if timeframe == '1day' or timeframe == '1week':
-		if restarted_yet == 0:
-			index = int(len(history_list)/2)
-		else:
-			index = 1
-	else:
-		index = int(len(history_list)/2)
+	index = int(len(history_list)/2)
 	price_list = []
 	high_price_list = []
 	low_price_list = []
@@ -650,7 +644,7 @@ while True:
 				sys.exit(0)
 
 				the_big_index += 1
-				restarted_yet = 0
+				restarted_yet = 1
 				avg50 = []
 				import sys
 				import datetime
@@ -845,18 +839,11 @@ while True:
 					memory_diffs = []
 					if 1 == 1:
 						try:
-							file = open('memories_'+tf_choice+'.txt','r')
-							memory_list = file.read().replace("'","").replace(',','').replace('"','').replace(']','').replace('[','').split('~')
-							file.close()
-							file = open('memory_weights_'+tf_choice+'.txt','r')
-							weight_list = file.read().replace("'","").replace(',','').replace('"','').replace(']','').replace('[','').split(' ')
-							file.close()							
-							file = open('memory_weights_high_'+tf_choice+'.txt','r')
-							high_weight_list = file.read().replace("'","").replace(',','').replace('"','').replace(']','').replace('[','').split(' ')
-							file.close()
-							file = open('memory_weights_low_'+tf_choice+'.txt','r')
-							low_weight_list = file.read().replace("'","").replace(',','').replace('"','').replace(']','').replace('[','').split(' ')
-							file.close()
+							_mem = load_memory(tf_choice)
+							memory_list = _mem["memory_list"]
+							weight_list = _mem["weight_list"]
+							high_weight_list = _mem["high_weight_list"]
+							low_weight_list = _mem["low_weight_list"]
 							mem_ind = 0
 							diffs_list = []
 							any_perfect = 'no'
@@ -1268,7 +1255,7 @@ while True:
 									price_list_length += 1		
 									which_candle_of_the_prediction_index += 1
 									try:
-										if len(price_list2)>=int(len(price_list)*0.25) and restarted_yet < 2:
+										if len(price_list2)>=int(len(price_list)*0.5) and restarted_yet < 2:
 											restarted_yet += 1
 											restarting = 'yes'
 											break
@@ -1277,8 +1264,9 @@ while True:
 									except:
 										restarting = 'no'
 									if len(price_list2) == len(price_list):
+										flush_memory(tf_choice, force=True)
 										the_big_index += 1
-										restarted_yet = 0
+										restarted_yet = 1
 										print('restarting')
 										restarting = 'yes'
 										avg50 = []

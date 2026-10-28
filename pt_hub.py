@@ -18,6 +18,7 @@ from tkinter import ttk, filedialog, messagebox
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.patches import Rectangle
+from matplotlib.collections import LineCollection
 from matplotlib.ticker import FuncFormatter
 from matplotlib.transforms import blended_transform_factory
 
@@ -324,6 +325,7 @@ DEFAULT_SETTINGS = {
     "dca_multiplier": 2.0,
     "dca_levels": [-5.0, -10.0, -20.0, -30.0, -40.0, -50.0, -50.0],
     "max_dca_buys_per_24h": 1,
+    "min_time_initial_buy_to_first_dca_hours": 4.0,
 
     # --- Trailing PM settings (editable; hot-reload friendly) ---
     "pm_start_pct_no_dca": 3.0,
@@ -348,20 +350,6 @@ DEFAULT_SETTINGS = {
 
     "auto_start_scripts": False,
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 SETTINGS_FILE = "gui_settings.json"
 
@@ -959,6 +947,7 @@ class CandleChart(ttk.Frame):
         trail_line: Optional[float] = None,
         dca_line_price: Optional[float] = None,
         avg_cost_basis: Optional[float] = None,
+        timeframe_override: Optional[str] = None,
     ) -> dict:
         """
         Prepare everything needed for a chart refresh OFF the Tk main thread.
@@ -966,7 +955,12 @@ class CandleChart(ttk.Frame):
         """
         cfg = self.settings_getter() or {}
 
-        tf = self.timeframe_var.get().strip()
+        if timeframe_override is not None:
+            tf = str(timeframe_override).strip()
+        else:
+            tf = self.timeframe_var.get().strip()
+        if not tf:
+            tf = str(cfg.get("default_timeframe") or "1hour").strip() or "1hour"
         limit = int(cfg.get("candles_limit", 120))
 
         candles = self.fetcher.get_klines(self.coin, tf, limit=limit)
@@ -1034,15 +1028,14 @@ class CandleChart(ttk.Frame):
         dca_line_price = payload.get("dca_line_price", None)
         avg_cost_basis = payload.get("avg_cost_basis", None)
 
-        # --- Avoid full ax.clear() (expensive). Just clear artists. ---
+        # Reset the axes normally.
+        # Do NOT manually clear Matplotlib's internal artist lists; that can leave
+        # stale transform/artist state around and cause random native crashes later.
         try:
-            self.ax.lines.clear()
-            self.ax.patches.clear()
-            self.ax.collections.clear()  # scatter dots live here
-            self.ax.texts.clear()        # labels/annotations live here
-        except Exception:
             self.ax.cla()
             self._apply_dark_chart_style()
+        except Exception:
+            return
 
         if not candles:
             self.ax.set_title(f"{self.coin} ({tf}) - no candles", color=DARK_FG)
@@ -1058,37 +1051,63 @@ class CandleChart(ttk.Frame):
             xs = list(range(len(candles)))
             self._xs = xs
 
-        rects = []
+        wick_segments = []
+        wick_colors = []
+
+        body_segments = []
+        body_colors = []
+        body_widths = []
+
         for i, c in enumerate(candles):
-            o = float(c["open"])
-            cl = float(c["close"])
-            h = float(c["high"])
-            l = float(c["low"])
+            try:
+                o = float(c["open"])
+                cl = float(c["close"])
+                h = float(c["high"])
+                l = float(c["low"])
 
-            up = cl >= o
-            candle_color = "green" if up else "red"
+                up = cl >= o
+                candle_color = "green" if up else "red"
 
-            self.ax.plot([i, i], [l, h], linewidth=1, color=candle_color)
+                # Wick
+                wick_segments.append([(i, l), (i, h)])
+                wick_colors.append(candle_color)
 
-            bottom = min(o, cl)
-            height = abs(cl - o)
-            if height < 1e-12:
-                height = 1e-12
+                # Body
+                body_low = min(o, cl)
+                body_high = max(o, cl)
 
-            rects.append(
-                Rectangle(
-                    (i - 0.35, bottom),
-                    0.7,
-                    height,
-                    facecolor=candle_color,
-                    edgecolor=candle_color,
-                    linewidth=1,
-                    alpha=0.9,
+                if abs(body_high - body_low) < 1e-12:
+                    body_segments.append([(i - 0.30, cl), (i + 0.30, cl)])
+                    body_widths.append(2)
+                else:
+                    body_segments.append([(i, body_low), (i, body_high)])
+                    body_widths.append(5)
+
+                body_colors.append(candle_color)
+
+            except Exception:
+                continue
+
+        try:
+            if wick_segments:
+                self.ax.add_collection(
+                    LineCollection(
+                        wick_segments,
+                        colors=wick_colors,
+                        linewidths=1,
+                    )
                 )
-            )
 
-        for r in rects:
-            self.ax.add_patch(r)
+            if body_segments:
+                self.ax.add_collection(
+                    LineCollection(
+                        body_segments,
+                        colors=body_colors,
+                        linewidths=body_widths,
+                    )
+                )
+        except Exception:
+            pass
 
         try:
             y_low = min(float(c["low"]) for c in candles)
@@ -1218,8 +1237,15 @@ class CandleChart(ttk.Frame):
                     tag = str(tr.get("tag") or "").upper().strip()
 
                     if side == "buy":
-                        label = "DCA" if tag == "DCA" else "BUY"
-                        color = "purple" if tag == "DCA" else "red"
+                        if tag == "LTH":
+                            label = "LTH"
+                            color = "blue"
+                        elif tag == "DCA":
+                            label = "DCA"
+                            color = "purple"
+                        else:
+                            label = "BUY"
+                            color = "red"
                     elif side == "sell":
                         label = "SELL"
                         color = "green"
@@ -1252,7 +1278,7 @@ class CandleChart(ttk.Frame):
                         continue
 
                     x = idx
-                    self.ax.scatter([x], [y], s=35, color=color, zorder=6)
+                    self.ax.scatter([x], [y], s=35, color=color, edgecolors="white", linewidths=1.2, zorder=6)
                     self.ax.annotate(
                         label,
                         (x, y),
@@ -1323,15 +1349,18 @@ class CandleChart(ttk.Frame):
         """
         Backward-compatible wrapper.
         """
-        payload = self.preload_refresh_data(
-            coin_folders,
-            current_buy_price=current_buy_price,
-            current_sell_price=current_sell_price,
-            trail_line=trail_line,
-            dca_line_price=dca_line_price,
-            avg_cost_basis=avg_cost_basis,
-        )
-        self.apply_refresh_data(payload)
+        try:
+            payload = self.preload_refresh_data(
+                coin_folders,
+                current_buy_price=current_buy_price,
+                current_sell_price=current_sell_price,
+                trail_line=trail_line,
+                dca_line_price=dca_line_price,
+                avg_cost_basis=avg_cost_basis,
+            )
+            self.apply_refresh_data(payload)
+        except Exception as e:
+            print(e)
 
 
 # -----------------------------
@@ -1425,17 +1454,28 @@ class AccountValueChart(ttk.Frame):
         except Exception:
             pass
 
-    def preload_refresh_data(self) -> dict:
-        path = self.history_path
+    @staticmethod
+    def _prepare_refresh_data_from_snapshot(
+        history_path: str,
+        trade_history_path: str,
+        max_points: int,
+        last_mtime: Optional[float],
+        drawn_once: bool,
+    ) -> dict:
+        """
+        Prepare account-value chart data without touching any Tk widget object.
+        This is safe to run in a background thread.
+        """
+        path = str(history_path or "")
+        trade_path = str(trade_history_path or "")
 
-        # mtime cache so we don't prepare a redraw if nothing changed
         try:
-            m_hist = os.path.getmtime(path)
+            m_hist = os.path.getmtime(path) if path else None
         except Exception:
             m_hist = None
 
         try:
-            m_trades = os.path.getmtime(self.trade_history_path) if self.trade_history_path else None
+            m_trades = os.path.getmtime(trade_path) if trade_path else None
         except Exception:
             m_trades = None
 
@@ -1443,36 +1483,66 @@ class AccountValueChart(ttk.Frame):
         mtime = max(candidates) if candidates else None
 
         if (
-            getattr(self, "_drawn_once", False)
+            bool(drawn_once)
             and mtime is not None
-            and self._last_mtime == mtime
+            and last_mtime == mtime
         ):
             return {"skip": True, "mtime": mtime}
 
         points: List[Tuple[float, float]] = []
 
-        try:
-            if os.path.isfile(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    for ln in f:
-                        try:
-                            obj = json.loads(ln)
-                            ts = obj.get("ts", None)
-                            v = obj.get("total_account_value", None)
-                            if ts is None or v is None:
+        while True:
+            try:
+                points = []
+
+                if path and os.path.isfile(path):
+                    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                        for ln in f:
+                            ln = ln.strip()
+                            if not ln:
                                 continue
 
-                            tsf = float(ts)
-                            vf = float(v)
+                            try:
+                                tsf = None
+                                vf = None
+
+                                clean = (
+                                    ln.replace("{", "")
+                                      .replace("}", "")
+                                      .replace('"', "")
+                                      .replace("'", "")
+                                )
+
+                                for part in clean.split(","):
+                                    if ":" not in part:
+                                        continue
+
+                                    k, raw_v = part.split(":", 1)
+                                    k = k.strip()
+                                    raw_v = raw_v.strip()
+
+                                    if k == "ts":
+                                        tsf = float(raw_v)
+                                    elif k in ("total_account_value", "account_value", "total_value", "value"):
+                                        vf = float(raw_v)
+
+                                if tsf is None or vf is None:
+                                    continue
+
+                            except Exception:
+                                continue
 
                             if (not math.isfinite(tsf)) or (not math.isfinite(vf)) or (vf <= 0.0):
                                 continue
 
                             points.append((tsf, vf))
-                        except Exception:
-                            continue
-        except Exception:
-            points = []
+
+                break
+
+            except Exception:
+                points = []
+                time.sleep(0.5)
+                continue
 
         if points:
             points.sort(key=lambda x: x[0])
@@ -1483,115 +1553,427 @@ class AccountValueChart(ttk.Frame):
                     dedup[-1] = (tsf, vf)
                 else:
                     dedup.append((tsf, vf))
+
             points = dedup
 
-        max_keep = min(max(2, int(self.max_points or 250)), 250)
+            # Remove isolated bad account-value readings
+            # from the chart only. Keep the raw history.
+            if len(points) >= 3:
+                cleaned_points = [points[0]]
+
+                for i in range(1, len(points) - 1):
+                    previous_value = points[i - 1][1]
+                    current_value = points[i][1]
+                    following_value = points[i + 1][1]
+
+                    # Drop the middle value only when
+                    # it is <= 75% of BOTH neighbors.
+                    if (
+                        current_value <= 0.75 * previous_value
+                        and current_value <= 0.75 * following_value
+                    ):
+                        continue
+
+                    cleaned_points.append(points[i])
+
+                cleaned_points.append(points[-1])
+                points = cleaned_points
+
+        max_keep = min(max(2, int(max_points or 250)), 250)
+
         n = len(points)
 
         if n > max_keep:
             first_pt = points[0]
             last_pt = points[-1]
 
-            mid_points = points[1:-1]
-            mid_n = len(mid_points)
+            mid_n = n - 2
             keep_mid = max_keep - 2
 
             if keep_mid <= 0 or mid_n <= 0:
                 points = [first_pt, last_pt]
             elif mid_n <= keep_mid:
-                points = [first_pt] + mid_points + [last_pt]
+                points = [first_pt] + points[1:-1] + [last_pt]
             else:
                 bucket_size = mid_n / float(keep_mid)
                 new_mid: List[Tuple[float, float]] = []
 
                 for i in range(keep_mid):
-                    start = int(i * bucket_size)
-                    end = int((i + 1) * bucket_size)
-                    if end <= start:
-                        end = start + 1
-                    if start >= mid_n:
+                    start_mid = int(i * bucket_size)
+                    end_mid = int((i + 1) * bucket_size)
+
+                    if end_mid <= start_mid:
+                        end_mid = start_mid + 1
+                    if start_mid >= mid_n:
                         break
-                    if end > mid_n:
-                        end = mid_n
+                    if end_mid > mid_n:
+                        end_mid = mid_n
 
-                    bucket = mid_points[start:end]
-                    if not bucket:
-                        continue
+                    start_idx = 1 + start_mid
+                    end_idx = 1 + end_mid
 
-                    avg_ts = sum(p[0] for p in bucket) / len(bucket)
-                    avg_val = sum(p[1] for p in bucket) / len(bucket)
-                    new_mid.append((avg_ts, avg_val))
+                    total_ts = 0.0
+                    total_val = 0.0
+                    count = 0
+
+                    for idx in range(start_idx, end_idx):
+                        try:
+                            tsf, vf = points[idx]
+                            total_ts += float(tsf)
+                            total_val += float(vf)
+                            count += 1
+                        except Exception:
+                            continue
+
+                    if count > 0:
+                        new_mid.append(
+                            (
+                                total_ts / float(count),
+                                total_val / float(count),
+                            )
+                        )
 
                 points = [first_pt] + new_mid + [last_pt]
 
-        markers: List[Tuple[int, float, str, str]] = []
+        in_trade_spans: List[Tuple[float, float]] = []
+        exposure_segments: List[Tuple[float, float, float]] = []
 
         try:
-            trades = _read_trade_history_jsonl(self.trade_history_path) if self.trade_history_path else []
-            if trades and points:
-                ts_list = [float(p[0]) for p in points]
-                ys = [round(p[1], 2) for p in points]
-                t_min = ts_list[0]
-                t_max = ts_list[-1]
+            trades = _read_trade_history_jsonl(trade_path) if trade_path else []
+
+            if trades and len(points) >= 2:
+                point_ts = [float(p[0]) for p in points]
+                point_vals = [float(p[1]) for p in points]
+
+                t_min = point_ts[0]
+                t_max = point_ts[-1]
+
+                def _ts_to_x(ts: float) -> float:
+                    if ts <= point_ts[0]:
+                        return 0.0
+
+                    if ts >= point_ts[-1]:
+                        return float(len(point_ts) - 1)
+
+                    i = bisect.bisect_right(point_ts, ts)
+
+                    if i <= 0:
+                        return 0.0
+
+                    if i >= len(point_ts):
+                        return float(len(point_ts) - 1)
+
+                    left_i = i - 1
+                    right_i = i
+
+                    left_ts = float(point_ts[left_i])
+                    right_ts = float(point_ts[right_i])
+
+                    if right_ts <= left_ts:
+                        return float(left_i)
+
+                    frac = (float(ts) - left_ts) / (right_ts - left_ts)
+
+                    if frac < 0.0:
+                        frac = 0.0
+                    if frac > 1.0:
+                        frac = 1.0
+
+                    return float(left_i) + frac
+
+                def _account_value_at(ts: float) -> float:
+                    if ts <= point_ts[0]:
+                        return float(point_vals[0])
+
+                    if ts >= point_ts[-1]:
+                        return float(point_vals[-1])
+
+                    i = bisect.bisect_right(point_ts, ts)
+
+                    if i <= 0:
+                        return float(point_vals[0])
+
+                    if i >= len(point_ts):
+                        return float(point_vals[-1])
+
+                    left_i = i - 1
+                    right_i = i
+
+                    left_ts = float(point_ts[left_i])
+                    right_ts = float(point_ts[right_i])
+
+                    left_val = float(point_vals[left_i])
+                    right_val = float(point_vals[right_i])
+
+                    if right_ts <= left_ts:
+                        return left_val
+
+                    frac = (float(ts) - left_ts) / (right_ts - left_ts)
+
+                    if frac < 0.0:
+                        frac = 0.0
+                    if frac > 1.0:
+                        frac = 1.0
+
+                    return left_val + ((right_val - left_val) * frac)
+
+                ordered_trades: List[Tuple[float, dict]] = []
 
                 for tr in trades:
-                    tts = tr.get("ts")
                     try:
-                        tts = float(tts)
+                        tts = float(tr.get("ts"))
                     except Exception:
                         continue
-                    if tts < t_min or tts > t_max:
-                        continue
 
+                    ordered_trades.append((tts, tr))
+
+                ordered_trades.sort(key=lambda x: x[0])
+
+                open_costs: Dict[str, float] = {}
+
+                def _apply_trade(tr: dict) -> None:
                     side = str(tr.get("side", "")).lower().strip()
                     tag = str(tr.get("tag", "")).upper().strip()
+                    sym = str(tr.get("symbol", "")).upper().strip()
+
+                    base_sym = (
+                        sym.split("-")[0].split("/")[0].strip()
+                        if sym
+                        else ""
+                    )
+
+                    if not base_sym:
+                        return
+
+                    if tag == "LTH":
+                        return
 
                     if side == "buy":
-                        action_label = "DCA" if tag == "DCA" else "BUY"
-                        color = "purple" if tag == "DCA" else "red"
+                        usd_used = None
+
+                        try:
+                            net_usd = tr.get("net_usd", None)
+
+                            if net_usd is not None:
+                                net_usd = float(net_usd)
+
+                                if net_usd < 0.0:
+                                    usd_used = -net_usd
+                        except Exception:
+                            usd_used = None
+
+                        if usd_used is None:
+                            try:
+                                notional = tr.get("notional_usd", None)
+
+                                if notional is not None:
+                                    notional = float(notional)
+
+                                    fees = tr.get("fees_usd", 0.0)
+                                    fees = float(fees or 0.0)
+
+                                    usd_used = notional + fees
+                            except Exception:
+                                usd_used = None
+
+                        if usd_used is not None and usd_used > 0.0:
+                            open_costs[base_sym] = (
+                                float(open_costs.get(base_sym, 0.0) or 0.0)
+                                + float(usd_used)
+                            )
+
                     elif side == "sell":
-                        action_label = "SELL"
-                        color = "green"
+                        applied = False
+
+                        try:
+                            after_cost = tr.get("position_cost_after_usd", None)
+
+                            if after_cost is not None:
+                                after_cost = max(0.0, float(after_cost))
+
+                                if after_cost <= 1e-9:
+                                    open_costs.pop(base_sym, None)
+                                else:
+                                    open_costs[base_sym] = after_cost
+
+                                applied = True
+                        except Exception:
+                            applied = False
+
+                        if not applied:
+                            try:
+                                used_cost = tr.get("position_cost_used_usd", None)
+
+                                if used_cost is not None:
+                                    used_cost = max(0.0, float(used_cost))
+
+                                    cur_cost = float(
+                                        open_costs.get(base_sym, 0.0) or 0.0
+                                    )
+
+                                    new_cost = max(
+                                        0.0,
+                                        cur_cost - used_cost,
+                                    )
+
+                                    if new_cost <= 1e-9:
+                                        open_costs.pop(base_sym, None)
+                                    else:
+                                        open_costs[base_sym] = new_cost
+
+                                    applied = True
+                            except Exception:
+                                applied = False
+
+                        if not applied:
+                            open_costs.pop(base_sym, None)
+
+                def _total_open_cost() -> float:
+                    total = 0.0
+
+                    for value in open_costs.values():
+                        try:
+                            value = float(value or 0.0)
+                        except Exception:
+                            value = 0.0
+
+                        if value > 0.0:
+                            total += value
+
+                    return total
+
+                trade_i = 0
+
+                while (
+                    trade_i < len(ordered_trades)
+                    and ordered_trades[trade_i][0] <= t_min
+                ):
+                    _apply_trade(ordered_trades[trade_i][1])
+                    trade_i += 1
+
+                current_ts = t_min
+                current_cost = _total_open_cost()
+                solid_start_ts = t_min if current_cost > 0.0 else None
+
+                while (
+                    trade_i < len(ordered_trades)
+                    and ordered_trades[trade_i][0] <= t_max
+                ):
+                    event_ts = float(ordered_trades[trade_i][0])
+
+                    if event_ts < current_ts:
+                        event_ts = current_ts
+
+                    if current_cost > 0.0 and event_ts > current_ts:
+                        middle_ts = current_ts + ((event_ts - current_ts) / 2.0)
+
+                        acct_value = _account_value_at(middle_ts)
+
+                        if acct_value > 0.0:
+                            ratio = current_cost / acct_value
+                        else:
+                            ratio = 0.0
+
+                        if ratio < 0.0:
+                            ratio = 0.0
+                        if ratio > 1.0:
+                            ratio = 1.0
+
+                        x0 = _ts_to_x(current_ts)
+                        x1 = _ts_to_x(event_ts)
+
+                        if x1 > x0:
+                            exposure_segments.append(
+                                (
+                                    x0,
+                                    x1,
+                                    ratio,
+                                )
+                            )
+
+                    was_in_trade = current_cost > 0.0
+
+                    same_ts = event_ts
+
+                    while (
+                        trade_i < len(ordered_trades)
+                        and float(ordered_trades[trade_i][0]) == same_ts
+                    ):
+                        _apply_trade(ordered_trades[trade_i][1])
+                        trade_i += 1
+
+                    current_cost = _total_open_cost()
+                    now_in_trade = current_cost > 0.0
+
+                    if (not was_in_trade) and now_in_trade:
+                        solid_start_ts = event_ts
+
+                    elif was_in_trade and (not now_in_trade):
+                        if solid_start_ts is not None:
+                            x0 = _ts_to_x(solid_start_ts)
+                            x1 = _ts_to_x(event_ts)
+
+                            if x1 > x0:
+                                in_trade_spans.append((x0, x1))
+
+                        solid_start_ts = None
+
+                    current_ts = event_ts
+
+                if current_cost > 0.0 and current_ts < t_max:
+                    middle_ts = current_ts + ((t_max - current_ts) / 2.0)
+
+                    acct_value = _account_value_at(middle_ts)
+
+                    if acct_value > 0.0:
+                        ratio = current_cost / acct_value
                     else:
-                        continue
+                        ratio = 0.0
 
-                    sym = str(tr.get("symbol", "")).upper().strip()
-                    coin_tag = (sym.split("-")[0].split("/")[0].strip() if sym else "") or (sym or "?")
-                    label = f"{coin_tag} {action_label}"
+                    if ratio < 0.0:
+                        ratio = 0.0
+                    if ratio > 1.0:
+                        ratio = 1.0
 
-                    i = bisect.bisect_left(ts_list, tts)
-                    if i <= 0:
-                        idx = 0
-                    elif i >= len(ts_list):
-                        idx = len(ts_list) - 1
-                    else:
-                        idx = i if abs(ts_list[i] - tts) < abs(tts - ts_list[i - 1]) else (i - 1)
+                    x0 = _ts_to_x(current_ts)
+                    x1 = _ts_to_x(t_max)
 
-                    markers.append((idx, ys[idx], label, color))
+                    if x1 > x0:
+                        exposure_segments.append(
+                            (
+                                x0,
+                                x1,
+                                ratio,
+                            )
+                        )
 
-                marker_cap = 120
-                if len(markers) > marker_cap:
-                    step = (len(markers) - 1) / float(marker_cap - 1)
-                    sampled: List[Tuple[int, float, str, str]] = []
-                    last_k = -1
-                    for j in range(marker_cap):
-                        k = int(round(j * step))
-                        if k <= last_k:
-                            k = last_k + 1
-                        if k >= len(markers):
-                            k = len(markers) - 1
-                        sampled.append(markers[k])
-                        last_k = k
-                    markers = sampled
+                if current_cost > 0.0 and solid_start_ts is not None:
+                    x0 = _ts_to_x(solid_start_ts)
+                    x1 = _ts_to_x(t_max)
+
+                    if x1 > x0:
+                        in_trade_spans.append((x0, x1))
+
         except Exception:
-            markers = []
+            in_trade_spans = []
+            exposure_segments = []
 
         return {
             "skip": False,
             "mtime": mtime,
             "points": points,
-            "markers": markers,
+            "in_trade_spans": in_trade_spans,
+            "exposure_segments": exposure_segments,
         }
+
+    def preload_refresh_data(self) -> dict:
+        return AccountValueChart._prepare_refresh_data_from_snapshot(
+            self.history_path,
+            self.trade_history_path,
+            self.max_points,
+            self._last_mtime,
+            bool(getattr(self, "_drawn_once", False)),
+        )
 
     def apply_refresh_data(self, payload: dict) -> None:
         if not isinstance(payload, dict):
@@ -1604,7 +1986,14 @@ class AccountValueChart(ttk.Frame):
         self._drawn_once = True
 
         points = payload.get("points", []) or []
-        markers = payload.get("markers", []) or []
+        exposure_segments = payload.get("exposure_segments", []) or []
+
+        try:
+            old_legend = self.ax.get_legend()
+            if old_legend is not None:
+                old_legend.remove()
+        except Exception:
+            pass
 
         try:
             self.ax.lines.clear()
@@ -1624,48 +2013,218 @@ class AccountValueChart(ttk.Frame):
         xs = list(range(len(points)))
         ys = [round(float(p[1]), 2) for p in points]
 
-        self.ax.plot(xs, ys, linewidth=1.5)
+        try:
+            trans = blended_transform_factory(
+                self.ax.transData,
+                self.ax.transAxes,
+            )
 
-        for x, y, label, color in markers:
-            try:
-                self.ax.scatter([x], [y], s=30, color=color, zorder=6)
-                self.ax.annotate(
-                    label,
-                    (x, y),
-                    textcoords="offset points",
-                    xytext=(0, 10),
-                    ha="center",
-                    fontsize=8,
-                    color=DARK_FG,
-                    zorder=7,
-                )
-            except Exception:
-                pass
+            overlap = 0.025
+
+            for x0, x1, ratio in exposure_segments:
+                try:
+                    x0 = float(x0)
+                    x1 = float(x1)
+                    ratio = float(ratio)
+
+                    if x1 <= x0:
+                        continue
+
+                    if ratio < 0.0:
+                        ratio = 0.0
+                    if ratio > 1.0:
+                        ratio = 1.0
+
+                    pct = ratio * 100.0
+
+                    if pct < 10.0:
+                        heat_color = "#00FF66"
+                    elif pct < 25.0:
+                        heat_color = "#9DFF00"
+                    elif pct < 50.0:
+                        heat_color = "#FFFF00"
+                    elif pct < 75.0:
+                        heat_color = "#FF8C00"
+                    else:
+                        heat_color = "#FF1744"
+
+                    rect = Rectangle(
+                        (x0 - overlap, 0.0),
+                        (x1 - x0) + (overlap * 2.0),
+                        1.0,
+                        transform=trans,
+                        facecolor=heat_color,
+                        edgecolor="none",
+                        linewidth=0,
+                        alpha=1.0,
+                        antialiased=False,
+                        zorder=0,
+                    )
+
+                    self.ax.add_patch(rect)
+
+                except Exception:
+                    pass
+
+        except Exception:
+            pass
+
+        self.ax.plot(
+            xs,
+            ys,
+            linewidth=5.0,
+            color="#05080C",
+            solid_capstyle="round",
+            solid_joinstyle="round",
+            zorder=5,
+        )
+
+        self.ax.plot(
+            xs,
+            ys,
+            linewidth=2.4,
+            color="#00E5FF",
+            solid_capstyle="round",
+            solid_joinstyle="round",
+            zorder=6,
+        )
 
         try:
-            self.ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _pos: f"${y:,.2f}"))
+            self.ax.scatter(
+                [xs[-1]],
+                [ys[-1]],
+                s=52,
+                color="#05080C",
+                edgecolors="#05080C",
+                linewidths=0,
+                zorder=7,
+            )
+
+            self.ax.scatter(
+                [xs[-1]],
+                [ys[-1]],
+                s=22,
+                color="#00E5FF",
+                edgecolors="white",
+                linewidths=0.8,
+                zorder=8,
+            )
+        except Exception:
+            pass
+
+        try:
+            legend_handles = [
+                Rectangle(
+                    (0, 0),
+                    1,
+                    1,
+                    facecolor="#00FF66",
+                    edgecolor="none",
+                    alpha=1.0,
+                    label="0-10%",
+                ),
+                Rectangle(
+                    (0, 0),
+                    1,
+                    1,
+                    facecolor="#9DFF00",
+                    edgecolor="none",
+                    alpha=1.0,
+                    label="10-25%",
+                ),
+                Rectangle(
+                    (0, 0),
+                    1,
+                    1,
+                    facecolor="#FFFF00",
+                    edgecolor="none",
+                    alpha=1.0,
+                    label="25-50%",
+                ),
+                Rectangle(
+                    (0, 0),
+                    1,
+                    1,
+                    facecolor="#FF8C00",
+                    edgecolor="none",
+                    alpha=1.0,
+                    label="50-75%",
+                ),
+                Rectangle(
+                    (0, 0),
+                    1,
+                    1,
+                    facecolor="#FF1744",
+                    edgecolor="none",
+                    alpha=1.0,
+                    label="75-100%",
+                ),
+            ]
+
+            legend = self.ax.legend(
+                handles=legend_handles,
+                title="Account In Trade",
+                loc="upper left",
+                fontsize=7,
+                title_fontsize=7,
+                frameon=True,
+                ncol=1,
+            )
+
+            legend.get_frame().set_facecolor(DARK_PANEL)
+            legend.get_frame().set_edgecolor(DARK_BORDER)
+            legend.get_frame().set_alpha(1.0)
+
+            for text in legend.get_texts():
+                text.set_color(DARK_FG)
+
+            legend.get_title().set_color(DARK_FG)
+
+        except Exception:
+            pass
+
+        try:
+            self.ax.yaxis.set_major_formatter(
+                FuncFormatter(
+                    lambda y, _pos: f"${y:,.2f}"
+                )
+            )
         except Exception:
             pass
 
         n = len(points)
         want = 5
+
         if n <= want:
             idxs = list(range(n))
         else:
             step = (n - 1) / float(want - 1)
+
             idxs = []
             last = -1
+
             for j in range(want):
                 i = int(round(j * step))
+
                 if i <= last:
                     i = last + 1
+
                 if i >= n:
                     i = n - 1
+
                 idxs.append(i)
                 last = i
 
         tick_x = [xs[i] for i in idxs]
-        tick_lbl = [time.strftime("%Y-%m-%d\n%H:%M:%S", time.localtime(points[i][0])) for i in idxs]
+
+        tick_lbl = [
+            time.strftime(
+                "%Y-%m-%d\n%H:%M:%S",
+                time.localtime(points[i][0]),
+            )
+            for i in idxs
+        ]
+
         try:
             self.ax.minorticks_off()
             self.ax.set_xticks(tick_x)
@@ -1674,12 +2233,21 @@ class AccountValueChart(ttk.Frame):
         except Exception:
             pass
 
-        self.ax.set_xlim(-0.5, (len(points) - 0.5) + 0.6)
+        self.ax.set_xlim(
+            -0.5,
+            (len(points) - 0.5) + 0.6,
+        )
 
         try:
-            self.ax.set_title(f"Account Value ({_fmt_money(ys[-1])})", color=DARK_FG)
+            self.ax.set_title(
+                f"Account Value ({_fmt_money(ys[-1])})",
+                color=DARK_FG,
+            )
         except Exception:
-            self.ax.set_title("Account Value", color=DARK_FG)
+            self.ax.set_title(
+                "Account Value",
+                color=DARK_FG,
+            )
 
         try:
             self.last_update_label.config(
@@ -1689,11 +2257,6 @@ class AccountValueChart(ttk.Frame):
             self.last_update_label.config(text="Last: N/A")
 
         self.canvas.draw_idle()
-
-    def refresh(self) -> None:
-        payload = self.preload_refresh_data()
-        self.apply_refresh_data(payload)
-
 
 
 # -----------------------------
@@ -1865,13 +2428,735 @@ class PowerTraderHub(tk.Tk):
 
         self._last_chart_refresh = 0.0
 
+        self._hub_user_closed = False
+
         if bool(self.settings.get("auto_start_scripts", False)):
             self.start_all_scripts()
 
-        self.after(250, self._tick)
+        self.after(250, self._safe_tick)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+
+    def _build_longshort_split(self, longshort_tab) -> None:
+        """
+        Long/Short tab layout:
+
+        TOP HALF:
+            AI Long / Short neural levels
+
+        BOTTOM HALF:
+            LTH % vs Daily EMA200
+        """
+
+        split = ttk.Frame(longshort_tab)
+        split.pack(fill="both", expand=True, padx=6, pady=6)
+
+        split.grid_columnconfigure(0, weight=1)
+
+        # Equal vertical split
+        split.grid_rowconfigure(0, weight=1, uniform="longshort_half")
+        split.grid_rowconfigure(1, weight=1, uniform="longshort_half")
+
+
+        # ============================================================
+        # TOP HALF — AI LONG / SHORT
+        # ============================================================
+
+        neural_box = ttk.LabelFrame(
+            split,
+            text="Neural Levels (0–7)"
+        )
+        neural_box.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=0,
+            pady=(0, 3)
+        )
+
+        legend = ttk.Frame(neural_box)
+        legend.pack(fill="x", padx=6, pady=(4, 0))
+
+        ttk.Label(
+            legend,
+            text="Blue = Long"
+        ).pack(side="left")
+
+        ttk.Label(
+            legend,
+            text="   "
+        ).pack(side="left")
+
+        ttk.Label(
+            legend,
+            text="Orange = Short"
+        ).pack(side="left")
+
+        self.lbl_neural_overview_last = ttk.Label(
+            legend,
+            text="Last: N/A"
+        )
+        self.lbl_neural_overview_last.pack(side="right")
+
+        neural_viewport = ttk.Frame(neural_box)
+        neural_viewport.pack(
+            fill="both",
+            expand=True,
+            padx=6,
+            pady=(4, 6)
+        )
+
+        neural_viewport.grid_rowconfigure(0, weight=1)
+        neural_viewport.grid_columnconfigure(0, weight=1)
+
+        self._neural_overview_canvas = tk.Canvas(
+            neural_viewport,
+            bg=DARK_PANEL2,
+            highlightthickness=1,
+            highlightbackground=DARK_BORDER,
+            bd=0,
+        )
+
+        self._neural_overview_canvas.grid(
+            row=0,
+            column=0,
+            sticky="nsew"
+        )
+
+        self._neural_overview_scroll = ttk.Scrollbar(
+            neural_viewport,
+            orient="vertical",
+            command=self._neural_overview_canvas.yview,
+        )
+
+        self._neural_overview_scroll.grid(
+            row=0,
+            column=1,
+            sticky="ns"
+        )
+
+        self._neural_overview_canvas.configure(
+            yscrollcommand=self._neural_overview_scroll.set
+        )
+
+        self.neural_wrap = WrapFrame(
+            self._neural_overview_canvas
+        )
+
+        self._neural_overview_window = (
+            self._neural_overview_canvas.create_window(
+                (0, 0),
+                window=self.neural_wrap,
+                anchor="nw",
+            )
+        )
+
+        def _update_neural_overview_scrollbars(event=None) -> None:
+            try:
+                c = self._neural_overview_canvas
+                win = self._neural_overview_window
+
+                c.update_idletasks()
+
+                bbox = c.bbox(win)
+
+                if not bbox:
+                    self._neural_overview_scroll.grid_remove()
+                    return
+
+                c.configure(scrollregion=bbox)
+
+                content_h = int(bbox[3] - bbox[1])
+                view_h = int(c.winfo_height())
+
+                if content_h > (view_h + 1):
+                    self._neural_overview_scroll.grid()
+                else:
+                    self._neural_overview_scroll.grid_remove()
+
+                    try:
+                        c.yview_moveto(0)
+                    except Exception:
+                        pass
+
+            except Exception:
+                pass
+
+        def _on_neural_canvas_configure(e) -> None:
+            try:
+                self._neural_overview_canvas.itemconfigure(
+                    self._neural_overview_window,
+                    width=int(e.width)
+                )
+            except Exception:
+                pass
+
+            _update_neural_overview_scrollbars()
+
+        self._neural_overview_canvas.bind(
+            "<Configure>",
+            _on_neural_canvas_configure,
+            add="+"
+        )
+
+        self.neural_wrap.bind(
+            "<Configure>",
+            _update_neural_overview_scrollbars,
+            add="+"
+        )
+
+        self._update_neural_overview_scrollbars = (
+            _update_neural_overview_scrollbars
+        )
+
+        def _wheel(e):
+            try:
+                if self._neural_overview_scroll.winfo_ismapped():
+                    self._neural_overview_canvas.yview_scroll(
+                        int(-1 * (e.delta / 120)),
+                        "units"
+                    )
+            except Exception:
+                pass
+
+        self._neural_overview_canvas.bind(
+            "<Enter>",
+            lambda _e: self._neural_overview_canvas.focus_set(),
+            add="+"
+        )
+
+        self._neural_overview_canvas.bind(
+            "<MouseWheel>",
+            _wheel,
+            add="+"
+        )
+
+        self.neural_tiles: Dict[str, NeuralSignalTile] = {}
+
+        self._neural_overview_cache: Dict[
+            str,
+            Tuple[float, Any]
+        ] = {}
+
+        self._rebuild_neural_overview()
+
+        try:
+            self.after_idle(
+                self._update_neural_overview_scrollbars
+            )
+        except Exception:
+            pass
+
+
+        # ============================================================
+        # BOTTOM HALF — LTH % VS DAILY EMA200
+        # ============================================================
+
+        lth_box = ttk.LabelFrame(
+            split,
+            text="LTH % vs Daily EMA200"
+        )
+
+        lth_box.grid(
+            row=1,
+            column=0,
+            sticky="nsew",
+            padx=0,
+            pady=(3, 0)
+        )
+
+        lth_box.grid_rowconfigure(1, weight=1)
+        lth_box.grid_columnconfigure(0, weight=1)
+
+        lth_top = ttk.Frame(lth_box)
+
+        lth_top.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=6,
+            pady=(4, 2)
+        )
+
+        ttk.Label(
+            lth_top,
+            text="Current LTH chooser values"
+        ).pack(side="left")
+
+        self.lbl_lth_ema_pick = ttk.Label(
+            lth_top,
+            text="Pick: N/A"
+        )
+
+        self.lbl_lth_ema_pick.pack(side="right")
+
+        table_wrap = ttk.Frame(lth_box)
+
+        table_wrap.grid(
+            row=1,
+            column=0,
+            sticky="nsew",
+            padx=6,
+            pady=(2, 6)
+        )
+
+        table_wrap.grid_rowconfigure(0, weight=1)
+        table_wrap.grid_columnconfigure(0, weight=1)
+
+        self.lth_pct_tree = ttk.Treeview(
+            table_wrap,
+            columns=(
+                "coin",
+                "pct"
+            ),
+            show="headings",
+            selectmode="none",
+        )
+
+        self.lth_pct_tree.heading(
+            "coin",
+            text="Coin"
+        )
+
+        self.lth_pct_tree.heading(
+            "pct",
+            text="% vs EMA200"
+        )
+
+        self.lth_pct_tree.column(
+            "coin",
+            anchor="center",
+            width=90,
+            stretch=True
+        )
+
+        self.lth_pct_tree.column(
+            "pct",
+            anchor="center",
+            width=120,
+            stretch=True
+        )
+
+        self.lth_pct_tree.grid(
+            row=0,
+            column=0,
+            sticky="nsew"
+        )
+
+        lth_scroll = ttk.Scrollbar(
+            table_wrap,
+            orient="vertical",
+            command=self.lth_pct_tree.yview
+        )
+
+        lth_scroll.grid(
+            row=0,
+            column=1,
+            sticky="ns"
+        )
+
+        self.lth_pct_tree.configure(
+            yscrollcommand=lth_scroll.set
+        )
+
+        try:
+            self.lth_pct_tree.tag_configure(
+                "pick",
+                foreground=DARK_ACCENT
+            )
+
+            self.lth_pct_tree.tag_configure(
+                "negative",
+                foreground=DARK_ACCENT2
+            )
+
+            self.lth_pct_tree.tag_configure(
+                "missing",
+                foreground=DARK_MUTED
+            )
+
+        except Exception:
+            pass
+
+        self._lth_pct_last_sig = None
+
+        self._refresh_lth_pct_overview()
+
+    def _refresh_lth_pct_overview(self) -> None:
+        """
+        Display the EXACT pct_from_ema200 values written by pt_thinker.py
+        and consumed by pt_trader.py for deciding the next LTH purchase.
+
+        We do NOT calculate a second version of the value here.
+        """
+
+        try:
+
+            tree = getattr(
+                self,
+                "lth_pct_tree",
+                None
+            )
+
+            if tree is None:
+                return
+
+            if not tree.winfo_exists():
+                return
+
+
+            # --------------------------------------------------------
+            # Get configured LTH coins
+            # --------------------------------------------------------
+
+            raw = self.settings.get(
+                "long_term_holdings",
+                []
+            ) or []
+
+
+            if isinstance(raw, dict):
+
+                raw = list(
+                    raw.keys()
+                )
+
+            elif isinstance(raw, str):
+
+                raw = [
+                    x.strip()
+                    for x in raw.replace(
+                        "\n",
+                        ","
+                    ).split(",")
+                    if x.strip()
+                ]
+
+            elif not isinstance(
+                raw,
+                (
+                    list,
+                    tuple,
+                    set
+                )
+            ):
+
+                raw = []
+
+
+            symbols = []
+            seen = set()
+
+
+            for value in raw:
+
+                sym = str(
+                    value
+                ).upper().strip()
+
+                if not sym:
+                    continue
+
+                if sym in seen:
+                    continue
+
+                if sym in (
+                    "USD",
+                    "USDT",
+                    "USDC"
+                ):
+                    continue
+
+                seen.add(sym)
+                symbols.append(sym)
+
+
+
+            # --------------------------------------------------------
+            # Read EXACT snapshot generated by thinker
+            # --------------------------------------------------------
+
+            path = os.path.join(
+                self.hub_dir,
+                "lth_daily_ema200.json"
+            )
+
+
+            payload = (
+                _safe_read_json(path)
+                or {}
+            )
+
+
+            try:
+
+                snapshot_ts = float(
+                    payload.get(
+                        "ts",
+                        0.0
+                    ) or 0.0
+                )
+
+            except Exception:
+
+                snapshot_ts = 0.0
+
+
+            # Same freshness limit used by trader:
+            # snapshot must be <= 5 minutes old
+            fresh = (
+                snapshot_ts > 0.0
+                and
+                abs(
+                    time.time()
+                    -
+                    snapshot_ts
+                ) <= 300.0
+            )
+
+
+            if fresh:
+
+                coins = payload.get(
+                    "coins",
+                    {}
+                )
+
+            else:
+
+                coins = {}
+
+
+            if not isinstance(
+                coins,
+                dict
+            ):
+
+                coins = {}
+
+
+
+            # --------------------------------------------------------
+            # Extract percentages
+            # --------------------------------------------------------
+
+            pct_map: Dict[
+                str,
+                float
+            ] = {}
+
+
+            for sym in symbols:
+
+                row = coins.get(
+                    sym,
+                    {}
+                )
+
+                if not isinstance(
+                    row,
+                    dict
+                ):
+                    continue
+
+
+                try:
+
+                    pct = float(
+                        row.get(
+                            "pct_from_ema200"
+                        )
+                    )
+
+                    if math.isfinite(pct):
+
+                        pct_map[
+                            sym
+                        ] = pct
+
+                except Exception:
+                    pass
+
+
+
+            # --------------------------------------------------------
+            # Determine current pick using SAME RULE AS TRADER
+            # --------------------------------------------------------
+
+            pick = None
+
+
+            scored = [
+                (
+                    pct,
+                    sym
+                )
+                for sym, pct
+                in pct_map.items()
+            ]
+
+
+            below = [
+                (
+                    pct,
+                    sym
+                )
+                for pct, sym
+                in scored
+                if pct < 0.0
+            ]
+
+
+            # If anything is below EMA:
+            # most negative wins
+            if below:
+
+                below.sort(
+                    key=lambda x:
+                        x[0]
+                )
+
+                pick = below[0][1]
+
+
+            # Otherwise:
+            # closest above EMA wins
+            elif scored:
+
+                scored.sort(
+                    key=lambda x:
+                        abs(x[0])
+                )
+
+                pick = scored[0][1]
+
+
+
+            # --------------------------------------------------------
+            # Only rebuild tree if values actually changed
+            # --------------------------------------------------------
+
+            sig = (
+                tuple(symbols),
+
+                tuple(
+                    (
+                        s,
+                        pct_map.get(s)
+                    )
+                    for s in symbols
+                ),
+
+                pick,
+
+                bool(fresh),
+            )
+
+
+            if sig != getattr(
+                self,
+                "_lth_pct_last_sig",
+                None
+            ):
+
+                self._lth_pct_last_sig = sig
+
+
+                for iid in tree.get_children():
+
+                    tree.delete(iid)
+
+
+                for sym in symbols:
+
+                    pct = pct_map.get(
+                        sym
+                    )
+
+
+                    if pct is None:
+
+                        display = "N/A"
+                        tag = "missing"
+
+
+                    else:
+
+                        display = (
+                            f"{pct:+.2f}%"
+                        )
+
+
+                        if sym == pick:
+
+                            tag = "pick"
+
+                        elif pct < 0.0:
+
+                            tag = "negative"
+
+                        else:
+
+                            tag = ""
+
+
+                    tree.insert(
+                        "",
+                        "end",
+                        iid=f"lthpct:{sym}",
+                        values=(
+                            sym,
+                            display
+                        ),
+                        tags=(
+                            (tag,)
+                            if tag
+                            else ()
+                        ),
+                    )
+
+
+                if not fresh:
+
+                    pick_text = (
+                        "Pick: N/A (stale)"
+                    )
+
+                elif pick:
+
+                    pick_text = (
+                        f"Pick: {pick}"
+                    )
+
+                else:
+
+                    pick_text = (
+                        "Pick: N/A"
+                    )
+
+
+                self.lbl_lth_ema_pick.config(
+                    text=pick_text
+                )
+
+
+        except Exception:
+            pass
+
+
+        # refresh every 2 seconds
+        try:
+
+            self._lth_pct_refresh_job = (
+                self.after(
+                    2000,
+                    self._refresh_lth_pct_overview
+                )
+            )
+
+        except Exception:
+            pass
 
     # ---- forced dark mode ----
 
@@ -2640,112 +3925,7 @@ class PowerTraderHub(tk.Tk):
         longshort_tab = ttk.Frame(self.left_nb)
         self.left_nb.add(longshort_tab, text="Long/Short")
 
-        neural_box = ttk.LabelFrame(longshort_tab, text="Neural Levels (0–7)")
-        neural_box.pack(fill="both", expand=True, padx=6, pady=6)
-
-        legend = ttk.Frame(neural_box)
-        legend.pack(fill="x", padx=6, pady=(4, 0))
-
-        ttk.Label(legend, text="Level bars: 0 = bottom, 7 = top").pack(side="left")
-        ttk.Label(legend, text="   ").pack(side="left")
-        ttk.Label(legend, text="Blue = Long").pack(side="left")
-        ttk.Label(legend, text="  ").pack(side="left")
-        ttk.Label(legend, text="Orange = Short").pack(side="left")
-
-        self.lbl_neural_overview_last = ttk.Label(legend, text="Last: N/A")
-        self.lbl_neural_overview_last.pack(side="right")
-
-        # Scrollable area for tiles (auto-hides the scrollbar if everything fits)
-        neural_viewport = ttk.Frame(neural_box)
-        neural_viewport.pack(fill="both", expand=True, padx=6, pady=(4, 6))
-        neural_viewport.grid_rowconfigure(0, weight=1)
-        neural_viewport.grid_columnconfigure(0, weight=1)
-
-        self._neural_overview_canvas = tk.Canvas(
-            neural_viewport,
-            bg=DARK_PANEL2,
-            highlightthickness=1,
-            highlightbackground=DARK_BORDER,
-            bd=0,
-        )
-        self._neural_overview_canvas.grid(row=0, column=0, sticky="nsew")
-
-        self._neural_overview_scroll = ttk.Scrollbar(
-            neural_viewport,
-            orient="vertical",
-            command=self._neural_overview_canvas.yview,
-        )
-        self._neural_overview_scroll.grid(row=0, column=1, sticky="ns")
-
-        self._neural_overview_canvas.configure(yscrollcommand=self._neural_overview_scroll.set)
-
-        self.neural_wrap = WrapFrame(self._neural_overview_canvas)
-        self._neural_overview_window = self._neural_overview_canvas.create_window(
-            (0, 0),
-            window=self.neural_wrap,
-            anchor="nw",
-        )
-
-        def _update_neural_overview_scrollbars(event=None) -> None:
-            """Update scrollregion + hide/show the scrollbar depending on overflow."""
-            try:
-                c = self._neural_overview_canvas
-                win = self._neural_overview_window
-
-                c.update_idletasks()
-                bbox = c.bbox(win)
-                if not bbox:
-                    self._neural_overview_scroll.grid_remove()
-                    return
-
-                c.configure(scrollregion=bbox)
-                content_h = int(bbox[3] - bbox[1])
-                view_h = int(c.winfo_height())
-
-                if content_h > (view_h + 1):
-                    self._neural_overview_scroll.grid()
-                else:
-                    self._neural_overview_scroll.grid_remove()
-                    try:
-                        c.yview_moveto(0)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        def _on_neural_canvas_configure(e) -> None:
-            # Keep the inner wrap frame exactly the canvas width so wrapping is correct.
-            try:
-                self._neural_overview_canvas.itemconfigure(self._neural_overview_window, width=int(e.width))
-            except Exception:
-                pass
-            _update_neural_overview_scrollbars()
-
-        self._neural_overview_canvas.bind("<Configure>", _on_neural_canvas_configure, add="+")
-        self.neural_wrap.bind("<Configure>", _update_neural_overview_scrollbars, add="+")
-        self._update_neural_overview_scrollbars = _update_neural_overview_scrollbars
-
-        # Mousewheel scroll inside the tiles area
-        def _wheel(e):
-            try:
-                if self._neural_overview_scroll.winfo_ismapped():
-                    self._neural_overview_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-            except Exception:
-                pass
-
-        self._neural_overview_canvas.bind("<Enter>", lambda _e: self._neural_overview_canvas.focus_set(), add="+")
-        self._neural_overview_canvas.bind("<MouseWheel>", _wheel, add="+")
-
-        # tiles by coin
-        self.neural_tiles: Dict[str, NeuralSignalTile] = {}
-        # small cache: path -> (mtime, value)
-        self._neural_overview_cache: Dict[str, Tuple[float, Any]] = {}
-
-        self._rebuild_neural_overview()
-        try:
-            self.after_idle(self._update_neural_overview_scrollbars)
-        except Exception:
-            pass
+        self._build_longshort_split(longshort_tab)
 
 
 
@@ -3496,6 +4676,24 @@ class PowerTraderHub(tk.Tk):
 
     def _load_bot_order_ids(self) -> Dict[str, List[str]]:
         try:
+            lth_ids = set()
+            trade_path = os.path.join(self.hub_dir, "trade_history.jsonl")
+            if os.path.isfile(trade_path):
+                with open(trade_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = (line or "").strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except Exception:
+                            continue
+                        if str(obj.get("tag") or "").upper().strip() != "LTH":
+                            continue
+                        oid = str(obj.get("order_id") or "").strip()
+                        if oid:
+                            lth_ids.add(oid)
+
             path = self._bot_order_ids_path()
             if os.path.isfile(path):
                 with open(path, "r", encoding="utf-8") as f:
@@ -3507,7 +4705,7 @@ class PowerTraderHub(tk.Tk):
                         if not sym:
                             continue
                         if isinstance(v, list):
-                            out[sym] = [str(x).strip() for x in v if str(x).strip()]
+                            out[sym] = [str(x).strip() for x in v if str(x).strip() and str(x).strip() not in lth_ids]
                     return out
         except Exception:
             pass
@@ -3556,6 +4754,9 @@ class PowerTraderHub(tk.Tk):
                     try:
                         obj = json.loads(line)
                     except Exception:
+                        continue
+
+                    if str(obj.get("tag") or "").upper().strip() == "LTH":
                         continue
 
                     sym_full = str(obj.get("symbol") or "").strip().upper()
@@ -3890,27 +5091,15 @@ class PowerTraderHub(tk.Tk):
         """
         Startup-only bot-order picker.
 
-        Goal:
-          - Let you manually trade / have long-term/manual holdings WITHOUT breaking the bot's cost basis.
-          - We do NOT store "long term amounts" anymore.
-          - Instead, we store ONLY the bot-owned order IDs for the *current* trade per coin.
-          - Anything in your account holdings beyond the bot-owned position qty is treated as
-            long-term / manual and ignored by the bot automatically.
-
-        Behavior:
-          - On trader start, for EACH currently-held coin (qty > 0), show the order-selection popup.
-          - If holdings cannot be fetched (Hub creds/session not available), fall back to:
-              * coins present in bot_order_ids.json
-              * coins present in trade_history.jsonl (current open trade)
-          - The popup lets you select the orders that belong to the bot's *current* trade.
-          - We save the selected order IDs to bot_order_ids.json.
-          - We NEVER auto-add/update any long-term amounts in settings.
+        The selection saved by THIS picker is the sole ownership decision for
+        currently-held coins. An empty saved list is an explicit "Select None"
+        decision and means all current holdings of that coin are manual/LTH.
         """
         try:
             existing = self._load_bot_order_ids()
             from_hist = self._bot_order_ids_from_trade_history()
 
-            # NOTE: _rh_get_holdings() returns a LIST of holdings objects (not a dict with "results").
+            # NOTE: _rh_get_holdings() returns a LIST of holdings objects.
             holdings_list = self._rh_get_holdings()
 
             held_coins: List[str] = []
@@ -3924,7 +5113,6 @@ class PowerTraderHub(tk.Tk):
                     if not sym or sym in ("USD", "USDT", "USDC"):
                         continue
 
-                    # Some RH payloads use different keys; accept any of these.
                     raw_qty = h.get("total_quantity", None)
                     if raw_qty is None:
                         raw_qty = h.get("quantity", None)
@@ -3939,33 +5127,39 @@ class PowerTraderHub(tk.Tk):
                     if qty > 1e-12:
                         held_coins.append(sym)
             else:
-                # Hub couldn't fetch holdings (creds/session). Still show the popups using local state.
+                # If holdings cannot be fetched, use local files only to decide
+                # which coin pickers need to be shown. History is NOT ownership.
                 held_coins = sorted(set(list(existing.keys()) + list(from_hist.keys())))
 
             if not held_coins:
                 return True
 
-            changed = False
-
             for sym in sorted(set(held_coins)):
-                # Prefer CURRENT-TRADE hints from bot trade_history first, because existing saved
-                # selections can be stale after a completed trade or manual activity.
-                preselect = set(from_hist.get(sym, []) or [])
-                if not preselect:
-                    preselect = set(existing.get(sym, []) or [])
+                # Only a previously SAVED Hub selection may be preselected.
+                # Do not resurrect old trade_history IDs into the picker.
+                preselect = set(existing.get(sym, []) or []) if sym in existing else set()
 
-                # Show the picker every startup so you can correct it after manual activity.
-                selected = self._pick_bot_orders_for_coin(sym, preselect_ids=sorted(preselect))
+                selected = self._pick_bot_orders_for_coin(
+                    sym,
+                    preselect_ids=sorted(preselect),
+                )
                 if selected is None:
-                    # user cancelled - treat as "don't start trader"
+                    # User cancelled - do not start trader.
                     return False
 
-                selected_ids = [str(x).strip() for x in (selected or []) if str(x).strip()]
-                if existing.get(sym, []) != selected_ids:
-                    existing[sym] = selected_ids
-                    changed = True
+                selected_ids = sorted({
+                    str(x).strip()
+                    for x in (selected or set())
+                    if str(x).strip()
+                })
 
-            if changed:
+                # CRITICAL:
+                # Always write the key, even when selected_ids == [].
+                # Missing key and explicit Select None are NOT the same thing.
+                existing[sym] = selected_ids
+
+                # Persist immediately for this coin so the trader starts from
+                # exactly what was just selected in the popup.
                 self._save_bot_order_ids(existing)
 
             return True
@@ -4389,6 +5583,11 @@ class PowerTraderHub(tk.Tk):
             return
 
         try:
+            tf = str(chart.timeframe_var.get()).strip()
+        except Exception:
+            tf = str(self.settings.get("default_timeframe") or "1hour").strip() or "1hour"
+
+        try:
             chart_coins = list(getattr(self, "chart_coins", []) or [])
             chart_cf_sig = (self.settings.get("main_neural_dir"), tuple(chart_coins))
             if getattr(self, "_chart_coin_folders_sig", None) != chart_cf_sig:
@@ -4423,7 +5622,7 @@ class PowerTraderHub(tk.Tk):
 
         t = threading.Thread(
             target=self._chart_refresh_worker,
-            args=(req_id, coin, buy_px, sell_px, trail_line, dca_line_price, avg_cost_basis),
+            args=(req_id, coin, tf, buy_px, sell_px, trail_line, dca_line_price, avg_cost_basis),
             daemon=True,
         )
         t.start()
@@ -4432,6 +5631,7 @@ class PowerTraderHub(tk.Tk):
         self,
         req_id: int,
         coin: str,
+        tf: str,
         buy_px: Optional[float],
         sell_px: Optional[float],
         trail_line: Optional[float],
@@ -4452,6 +5652,7 @@ class PowerTraderHub(tk.Tk):
                 trail_line=trail_line,
                 dca_line_price=dca_line_price,
                 avg_cost_basis=avg_cost_basis,
+                timeframe_override=tf,
             )
         except Exception:
             payload = None
@@ -4507,35 +5708,69 @@ class PowerTraderHub(tk.Tk):
         if not chart:
             return
 
-        with self._account_chart_refresh_lock:
-            self._account_chart_refresh_request_id += 1
-            req_id = self._account_chart_refresh_request_id
+        # Snapshot only plain Python values on the Tk thread.
+        # The worker must not touch the Tk chart widget object.
+        try:
+            history_path = str(getattr(chart, "history_path", "") or "")
+            trade_history_path = str(getattr(chart, "trade_history_path", "") or "")
+            max_points = int(getattr(chart, "max_points", 250) or 250)
+            last_mtime = getattr(chart, "_last_mtime", None)
+            drawn_once = bool(getattr(chart, "_drawn_once", False))
+        except BaseException as e:
+            try:
+                self._print_hub_exception(
+                    "Could not snapshot account-chart refresh inputs. Skipping this account-chart refresh.",
+                    e,
+                    getattr(e, "__traceback__", None),
+                )
+            except Exception:
+                pass
+            return
 
-            # Do not stack multiple background refresh workers.
-            # Keep only the latest requested id and let the next tick launch again.
+        with self._account_chart_refresh_lock:
+            # Do not invalidate the worker that is already running.
             if self._account_chart_refresh_inflight_id:
                 return
 
+            self._account_chart_refresh_request_id += 1
+            req_id = self._account_chart_refresh_request_id
             self._account_chart_refresh_inflight_id = req_id
 
         t = threading.Thread(
             target=self._account_chart_refresh_worker,
-            args=(req_id,),
+            args=(req_id, history_path, trade_history_path, max_points, last_mtime, drawn_once),
             daemon=True,
         )
         t.start()
 
-    def _account_chart_refresh_worker(self, req_id: int) -> None:
+    def _account_chart_refresh_worker(
+        self,
+        req_id: int,
+        history_path: str,
+        trade_history_path: str,
+        max_points: int,
+        last_mtime: Optional[float],
+        drawn_once: bool,
+    ) -> None:
         payload: Optional[dict] = None
 
         try:
-            chart = self.account_chart
-            if not chart:
-                return
-
-            payload = chart.preload_refresh_data()
-        except Exception:
+            payload = AccountValueChart._prepare_refresh_data_from_snapshot(
+                history_path,
+                trade_history_path,
+                max_points,
+                last_mtime,
+                drawn_once,
+            )
+        except BaseException as e:
             payload = None
+            try:
+                import traceback
+                print(f"\n[{_now_str()}] Account chart background refresh failed. Ignoring this refresh so the hub keeps running.", file=sys.stderr, flush=True)
+                traceback.print_exception(type(e), e, getattr(e, "__traceback__", None), file=sys.stderr)
+                sys.stderr.flush()
+            except Exception:
+                pass
         finally:
             with self._account_chart_refresh_lock:
                 try:
@@ -4645,6 +5880,77 @@ class PowerTraderHub(tk.Tk):
                 txt.see("end")
             except Exception:
                 pass
+
+    def _print_hub_exception(self, label: str, exc: Optional[BaseException] = None, tb=None) -> None:
+        """
+        Print hub errors to the console only. No log files.
+        """
+        try:
+            import traceback
+            print(f"\n[{_now_str()}] {label}", file=sys.stderr, flush=True)
+            if exc is not None:
+                traceback.print_exception(
+                    type(exc),
+                    exc,
+                    tb if tb is not None else getattr(exc, "__traceback__", None),
+                    file=sys.stderr,
+                )
+            else:
+                traceback.print_stack(file=sys.stderr)
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+    def report_callback_exception(self, exc, val, tb) -> None:
+        """
+        Tkinter calls this for exceptions raised inside button/timer/UI callbacks.
+        The old version silently swallowed them, which made hub problems invisible.
+        """
+        try:
+            import traceback
+            print(f"\n[{_now_str()}] Tk callback exception caught. The hub will keep running.", file=sys.stderr, flush=True)
+            traceback.print_exception(exc, val, tb, file=sys.stderr)
+            sys.stderr.flush()
+        except Exception as print_err:
+            try:
+                print(f"\n[{_now_str()}] Failed to print Tk callback exception: {print_err}", file=sys.stderr, flush=True)
+            except Exception:
+                pass
+
+    def _safe_tick(self) -> None:
+        try:
+            self._tick()
+        except BaseException as e:
+            self._print_hub_exception(
+                "Hub refresh tick crashed. The hub will keep running and schedule the next tick.",
+                e,
+                getattr(e, "__traceback__", None),
+            )
+        finally:
+            if bool(getattr(self, "_hub_user_closed", False)):
+                return
+
+            delay_seconds = 1.0
+            try:
+                delay_seconds = float(self.settings.get("ui_refresh_seconds", 1.0))
+                if (not math.isfinite(delay_seconds)) or delay_seconds <= 0:
+                    delay_seconds = 1.0
+            except BaseException as e:
+                self._print_hub_exception(
+                    "Invalid ui_refresh_seconds value. Falling back to 1 second.",
+                    e,
+                    getattr(e, "__traceback__", None),
+                )
+                delay_seconds = 1.0
+
+            try:
+                self.after(max(100, int(delay_seconds * 1000)), self._safe_tick)
+            except BaseException as e:
+                self._print_hub_exception(
+                    "Could not schedule the next hub refresh tick.",
+                    e,
+                    getattr(e, "__traceback__", None),
+                )
 
     def _tick(self) -> None:
         # process labels
@@ -4804,8 +6110,6 @@ class PowerTraderHub(tk.Tk):
             pass
 
         self.status.config(text=f"{_now_str()} | hub_dir={self.hub_dir}")
-        self.after(int(float(self.settings.get("ui_refresh_seconds", 1.0)) * 1000), self._tick)
-
 
 
     def _refresh_trader_status(self) -> None:
@@ -5029,8 +6333,77 @@ class PowerTraderHub(tk.Tk):
         # -------------------------
         # Long-term holdings table
         # -------------------------
+        lth_history: Dict[str, dict] = {}
+        try:
+            for tr in _read_trade_history_jsonl(self.trade_history_path):
+                if str(tr.get("tag") or "").upper().strip() != "LTH":
+                    continue
+
+                sym_full = str(tr.get("symbol") or "").upper().strip()
+                sym = sym_full.split("-")[0].strip() if sym_full else ""
+                if not sym:
+                    continue
+
+                row = lth_history.setdefault(sym, {"qty": 0.0, "cost": 0.0, "complete": True})
+
+                if str(tr.get("side") or "").lower().strip() != "buy":
+                    row["complete"] = False
+                    continue
+
+                try:
+                    qty = float(tr.get("qty", 0.0) or 0.0)
+                except Exception:
+                    qty = 0.0
+
+                if qty <= 0.0:
+                    row["complete"] = False
+                    continue
+
+                cost = None
+                try:
+                    net_usd = tr.get("net_usd", None)
+                    if net_usd is not None and float(net_usd) < 0.0:
+                        cost = -float(net_usd)
+                except Exception:
+                    cost = None
+
+                if cost is None:
+                    try:
+                        notional = tr.get("notional_usd", None)
+                        if notional is not None and float(notional) > 0.0:
+                            fees = tr.get("fees_usd", None)
+                            fees = float(fees) if fees is not None else 0.0
+                            cost = float(notional) + fees
+                    except Exception:
+                        cost = None
+
+                if cost is None:
+                    try:
+                        price = float(tr.get("price", 0.0) or 0.0)
+                        if price > 0.0:
+                            fees = tr.get("fees_usd", None)
+                            fees = float(fees) if fees is not None else 0.0
+                            cost = (qty * price) + fees
+                    except Exception:
+                        cost = None
+
+                if cost is None or cost <= 0.0:
+                    row["complete"] = False
+                    continue
+
+                row["qty"] = float(row.get("qty", 0.0) or 0.0) + qty
+                row["cost"] = float(row.get("cost", 0.0) or 0.0) + float(cost)
+        except Exception:
+            lth_history = {}
+
+        try:
+            self.lth_tree.heading("value", text="Value / LTH PnL")
+            self.lth_tree.column("value", width=270, anchor="center")
+        except Exception:
+            pass
+
         lth_rows_for_tree: List[Tuple[str, Tuple[Any, ...]]] = []
-        lth_rows_sort: List[Tuple[str, float, Optional[float], str]] = []
+        lth_rows_sort: List[Tuple[str, float, Optional[float], str, str]] = []
 
         for coin, pos in (positions or {}).items():
             sym = str(coin).upper().strip()
@@ -5072,20 +6445,37 @@ class PowerTraderHub(tk.Tk):
             if not qty_disp:
                 qty_disp = "0"
 
-            lth_rows_sort.append((sym, rq, value_usd, qty_disp))
+            value_disp = _fmt_money(value_usd)
+
+            hist = lth_history.get(sym)
+            if hist and bool(hist.get("complete", False)) and value_usd is not None:
+                try:
+                    hist_qty = float(hist.get("qty", 0.0) or 0.0)
+                    hist_cost = float(hist.get("cost", 0.0) or 0.0)
+                    tolerance = max(1e-8, abs(hist_qty) * 1e-6)
+
+                    if hist_qty > 0.0 and hist_cost > 0.0 and abs(hist_qty - rq) <= tolerance:
+                        pnl = float(value_usd) - hist_cost
+                        pnl_pct = (pnl / hist_cost) * 100.0
+                        pnl_money = f"+${abs(pnl):,.2f}" if pnl >= 0.0 else f"-${abs(pnl):,.2f}"
+                        value_disp = f"{value_disp} | PnL {pnl_money} ({pnl_pct:+.2f}%)"
+                except Exception:
+                    pass
+
+            lth_rows_sort.append((sym, rq, value_usd, qty_disp, value_disp))
 
         try:
             lth_rows_sort.sort(key=lambda r: (-float(r[2]) if r[2] is not None else float("inf"), r[0]))
         except Exception:
             pass
 
-        for coin, _rq, value_usd, qty_disp in lth_rows_sort:
+        for coin, _rq, value_usd, qty_disp, value_disp in lth_rows_sort:
             lth_rows_for_tree.append((
                 f"lth:{coin}",
                 (
                     coin,
                     qty_disp,
-                    _fmt_money(value_usd),
+                    value_disp,
                 ),
             ))
 
@@ -5201,16 +6591,6 @@ class PowerTraderHub(tk.Tk):
                     pass
         except Exception:
             pass
-
-
-
-
-
-
-
-
-
-
 
     def _refresh_pnl(self) -> None:
         # mtime cache: avoid reading/parsing every tick
@@ -5879,6 +7259,14 @@ class PowerTraderHub(tk.Tk):
             _dca_levels = DEFAULT_SETTINGS.get("dca_levels", [])
         dca_levels_var = tk.StringVar(value=",".join(str(x) for x in _dca_levels))
         max_dca_var = tk.StringVar(value=str(self.settings.get("max_dca_buys_per_24h", DEFAULT_SETTINGS.get("max_dca_buys_per_24h", 2))))
+        min_first_dca_hours_var = tk.StringVar(
+            value=str(
+                self.settings.get(
+                    "min_time_initial_buy_to_first_dca_hours",
+                    DEFAULT_SETTINGS.get("min_time_initial_buy_to_first_dca_hours", 4.0),
+                )
+            )
+        )
 
         # --- Trailing PM settings (editable; hot-reload friendly) ---
         pm_no_dca_var = tk.StringVar(value=str(self.settings.get("pm_start_pct_no_dca", DEFAULT_SETTINGS.get("pm_start_pct_no_dca", 5.0))))
@@ -5955,6 +7343,12 @@ class PowerTraderHub(tk.Tk):
         add_row(r, "DCA multiplier:", dca_mult_var); r += 1
 
         add_row(r, "Max DCA buys / coin (rolling 24h):", max_dca_var); r += 1
+
+        add_row(
+            r,
+            "Minimum time between initial Buy and First DCA (hours):",
+            min_first_dca_hours_var,
+        ); r += 1
 
         add_row(r, "Trailing PM start % (no DCA):", pm_no_dca_var); r += 1
         add_row(r, "Trailing PM start % (with DCA):", pm_with_dca_var); r += 1
@@ -6649,6 +8043,19 @@ class PowerTraderHub(tk.Tk):
                     md_i = 0
                 self.settings["max_dca_buys_per_24h"] = md_i
 
+                try:
+                    min_first_dca_hours = float((min_first_dca_hours_var.get() or "").strip())
+                except Exception:
+                    min_first_dca_hours = float(
+                        self.settings.get(
+                            "min_time_initial_buy_to_first_dca_hours",
+                            DEFAULT_SETTINGS.get("min_time_initial_buy_to_first_dca_hours", 4.0),
+                        )
+                    )
+                if min_first_dca_hours < 0.0:
+                    min_first_dca_hours = 0.0
+                self.settings["min_time_initial_buy_to_first_dca_hours"] = min_first_dca_hours
+
 
                 # --- Trailing PM settings ---
                 try:
@@ -6735,18 +8142,365 @@ class PowerTraderHub(tk.Tk):
         ttk.Button(btns, text="Save", command=save).pack(side="left")
         ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="left", padx=8)
 
-
-    # ---- close ----
-
     def _on_close(self) -> None:
-        # Don’t force kill; just stop if running (you can change this later)
+        """
+        Only close the hub after a real human confirmation.
+
+        A random WM_DELETE/window-close event was reaching this handler and making the
+        hub exit cleanly with no crash traceback. A confirmed close still behaves the
+        same after the confirmation: scripts are stopped, then the hub window exits.
+        """
         try:
-            self.stop_all_scripts()
+            if bool(getattr(self, "_hub_close_confirm_open", False)):
+                return
+
+            self._hub_close_confirm_open = True
+            try:
+                confirmed = bool(messagebox.askyesno(
+                    "Close PowerTrader Hub?",
+                    "Close the hub and stop all running scripts?",
+                    parent=self,
+                ))
+            finally:
+                self._hub_close_confirm_open = False
+
+            if not confirmed:
+                try:
+                    import traceback
+                    print(f"\n[{_now_str()}] Hub close request ignored because it was not confirmed.", file=sys.stderr, flush=True)
+                    print("Stack for ignored close request:", file=sys.stderr, flush=True)
+                    traceback.print_stack(file=sys.stderr)
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+                return
+
+        except BaseException as e:
+            try:
+                import traceback
+                print(f"\n[{_now_str()}] Hub close confirmation failed. Ignoring close request so the hub keeps running.", file=sys.stderr, flush=True)
+                traceback.print_exception(type(e), e, getattr(e, "__traceback__", None), file=sys.stderr)
+                sys.stderr.flush()
+            except Exception:
+                pass
+            return
+
+        self._hub_user_closed = True
+
+        try:
+            import traceback
+            print(f"\n[{_now_str()}] HUB CLOSE CONFIRMED BY USER. Closing hub now.", file=sys.stderr, flush=True)
+            print("Call stack that triggered confirmed _on_close():", file=sys.stderr, flush=True)
+            traceback.print_stack(file=sys.stderr)
+            sys.stderr.flush()
         except Exception:
             pass
-        self.destroy()
+
+        try:
+            self.stop_all_scripts()
+        except BaseException as e:
+            try:
+                import traceback
+                print(f"\n[{_now_str()}] Error while stopping scripts during hub close:", file=sys.stderr, flush=True)
+                traceback.print_exception(type(e), e, getattr(e, "__traceback__", None), file=sys.stderr)
+                sys.stderr.flush()
+            except Exception:
+                pass
+
+        try:
+            self.destroy()
+        except BaseException as e:
+            try:
+                import traceback
+                print(f"\n[{_now_str()}] Error while destroying hub window during hub close:", file=sys.stderr, flush=True)
+                traceback.print_exception(type(e), e, getattr(e, "__traceback__", None), file=sys.stderr)
+                sys.stderr.flush()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
-    app = PowerTraderHub()
-    app.mainloop()
+    import traceback
+    import atexit
+    import faulthandler
+    import signal
+
+    _hub_started_at = time.time()
+    _hub_exit_state = {
+        "app": None,
+        "reason": "process started",
+    }
+
+    def _flush_hub_stderr() -> None:
+        try:
+            sys.stderr.flush()
+        except Exception:
+            pass
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+    def _print_top_level_hub_exception(label: str, exc: Optional[BaseException] = None, tb=None, include_stack: bool = False) -> None:
+        """
+        Print top-level hub failures to the console only. No log files.
+        """
+        try:
+            print(f"\n[{_now_str()}] {label}", file=sys.stderr, flush=True)
+            if exc is not None:
+                traceback.print_exception(
+                    type(exc),
+                    exc,
+                    tb if tb is not None else getattr(exc, "__traceback__", None),
+                    file=sys.stderr,
+                )
+            if include_stack:
+                print("Current main-thread stack:", file=sys.stderr, flush=True)
+                traceback.print_stack(file=sys.stderr)
+            _flush_hub_stderr()
+        except Exception:
+            pass
+
+    def _dump_all_hub_thread_stacks(label: str) -> None:
+        try:
+            print(f"\n[{_now_str()}] {label}", file=sys.stderr, flush=True)
+            faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+            _flush_hub_stderr()
+        except Exception:
+            pass
+
+    def _hub_app_exists(app_obj) -> bool:
+        try:
+            return bool(app_obj is not None and app_obj.winfo_exists())
+        except Exception:
+            return False
+
+    def _hub_atexit_report() -> None:
+        """
+        Runs on normal Python interpreter shutdown. If you see this, Python exited
+        normally instead of being hard-killed by the OS.
+        """
+        try:
+            app_obj = _hub_exit_state.get("app", None)
+            user_closed = bool(getattr(app_obj, "_hub_user_closed", False)) if app_obj is not None else False
+            app_exists = _hub_app_exists(app_obj) if app_obj is not None else False
+            uptime = time.time() - float(_hub_started_at)
+
+            print(
+                f"\n[{_now_str()}] HUB PYTHON PROCESS IS EXITING. "
+                f"user_closed={user_closed} app_exists={app_exists} "
+                f"uptime_seconds={uptime:.1f} last_reason={_hub_exit_state.get('reason')}",
+                file=sys.stderr,
+                flush=True,
+            )
+            _dump_all_hub_thread_stacks("Thread stacks at Python process exit:")
+            _flush_hub_stderr()
+        except Exception:
+            pass
+
+    atexit.register(_hub_atexit_report)
+
+    try:
+        faulthandler.enable(file=sys.stderr, all_threads=True)
+        _print_top_level_hub_exception("Hub fatal-crash console diagnostics enabled.")
+    except BaseException as e:
+        _print_top_level_hub_exception(
+            "Could not enable faulthandler fatal-crash diagnostics.",
+            e,
+            getattr(e, "__traceback__", None),
+        )
+
+    def _hub_unhandled_exception_hook(exc_type, exc, tb) -> None:
+        _hub_exit_state["reason"] = "sys.excepthook unhandled exception"
+        _print_top_level_hub_exception(
+            "Unhandled exception reached sys.excepthook.",
+            exc,
+            tb,
+        )
+
+    sys.excepthook = _hub_unhandled_exception_hook
+
+    if hasattr(sys, "unraisablehook"):
+        def _hub_unraisable_hook(unraisable) -> None:
+            try:
+                _print_top_level_hub_exception(
+                    f"Unraisable exception caught: {getattr(unraisable, 'err_msg', None)} object={getattr(unraisable, 'object', None)!r}",
+                    getattr(unraisable, "exc_value", None),
+                    getattr(unraisable, "exc_traceback", None),
+                )
+            except Exception:
+                pass
+
+        sys.unraisablehook = _hub_unraisable_hook
+
+    if hasattr(threading, "excepthook"):
+        def _hub_thread_excepthook(args) -> None:
+            _print_top_level_hub_exception(
+                f"Unhandled background-thread exception in {getattr(args.thread, 'name', 'unknown thread')}.",
+                getattr(args, "exc_value", None),
+                getattr(args, "exc_traceback", None),
+            )
+
+        threading.excepthook = _hub_thread_excepthook
+
+    def _hub_signal_handler(signum, frame) -> None:
+        try:
+            sig_name = None
+            try:
+                sig_name = signal.Signals(signum).name
+            except Exception:
+                sig_name = str(signum)
+
+            _hub_exit_state["reason"] = f"signal received: {sig_name}"
+            _print_top_level_hub_exception(
+                f"Hub received {sig_name}. Ignoring it so the hub only exits from the window close button.",
+                None,
+                None,
+            )
+
+            if frame is not None:
+                print("Stack at signal time:", file=sys.stderr, flush=True)
+                traceback.print_stack(frame, file=sys.stderr)
+
+            _dump_all_hub_thread_stacks(f"All thread stacks after {sig_name}:")
+        except Exception:
+            pass
+
+    for _sig_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        try:
+            _sig = getattr(signal, _sig_name, None)
+            if _sig is not None:
+                signal.signal(_sig, _hub_signal_handler)
+        except Exception:
+            pass
+
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            _CTRL_EVENT_NAMES = {
+                0: "CTRL_C_EVENT",
+                1: "CTRL_BREAK_EVENT",
+                2: "CTRL_CLOSE_EVENT",
+                5: "CTRL_LOGOFF_EVENT",
+                6: "CTRL_SHUTDOWN_EVENT",
+            }
+
+            def _hub_console_ctrl_handler(ctrl_type) -> bool:
+                try:
+                    event_name = _CTRL_EVENT_NAMES.get(int(ctrl_type), f"UNKNOWN_CTRL_EVENT_{ctrl_type}")
+                    _hub_exit_state["reason"] = f"Windows console control event: {event_name}"
+                    print(
+                        f"\n[{_now_str()}] Windows console control event received: {event_name}. "
+                        "This did NOT come from the hub window close handler.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    _dump_all_hub_thread_stacks(f"All thread stacks after {event_name}:")
+                except Exception:
+                    pass
+
+                # Handle Ctrl+C/Ctrl+Break ourselves. For console close/logoff/shutdown,
+                # Windows may still terminate the process after a short grace period, but
+                # this prints the reason first when Python is allowed to run the handler.
+                return True
+
+            _hub_console_ctrl_handler_ref = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)(_hub_console_ctrl_handler)
+            ctypes.windll.kernel32.SetConsoleCtrlHandler(_hub_console_ctrl_handler_ref, True)
+            _print_top_level_hub_exception("Windows console-control diagnostics enabled.")
+        except BaseException as e:
+            _print_top_level_hub_exception(
+                "Could not enable Windows console-control diagnostics.",
+                e,
+                getattr(e, "__traceback__", None),
+            )
+
+    app = None
+
+    while True:
+        try:
+            if app is None or not _hub_app_exists(app):
+                _hub_exit_state["reason"] = "creating PowerTraderHub window"
+                app = PowerTraderHub()
+                _hub_exit_state["app"] = app
+
+            _hub_exit_state["reason"] = "inside Tk mainloop"
+            app.mainloop()
+
+            if bool(getattr(app, "_hub_user_closed", False)):
+                _hub_exit_state["reason"] = "hub window close handler ran"
+                _print_top_level_hub_exception(
+                    "Hub mainloop ended because _hub_user_closed=True. The _on_close stack above should show who/what triggered it."
+                )
+                break
+
+            _hub_exit_state["reason"] = "mainloop returned without user close"
+            _print_top_level_hub_exception(
+                "Hub mainloop returned even though the user did not close the hub. Keeping the hub alive.",
+                None,
+                None,
+                include_stack=True,
+            )
+
+            if not _hub_app_exists(app):
+                _print_top_level_hub_exception(
+                    "Hub window no longer exists without a user close. Recreating the hub window.",
+                    None,
+                    None,
+                    include_stack=True,
+                )
+                app = None
+                _hub_exit_state["app"] = None
+
+        except KeyboardInterrupt as e:
+            _hub_exit_state["reason"] = "KeyboardInterrupt caught"
+            _print_top_level_hub_exception(
+                "KeyboardInterrupt ignored. Close the hub window to exit.",
+                e,
+                getattr(e, "__traceback__", None),
+            )
+
+        except BaseException as e:
+            _hub_exit_state["reason"] = f"top-level exception: {type(e).__name__}"
+            _print_top_level_hub_exception(
+                "Top-level hub exception caught. Keeping/restarting the hub.",
+                e,
+                getattr(e, "__traceback__", None),
+            )
+
+            try:
+                if app is not None and bool(getattr(app, "_hub_user_closed", False)):
+                    _print_top_level_hub_exception(
+                        "Top-level exception happened after _hub_user_closed=True. Exiting because the close handler ran."
+                    )
+                    break
+                if app is not None and not _hub_app_exists(app):
+                    app = None
+                    _hub_exit_state["app"] = None
+            except BaseException as state_err:
+                _print_top_level_hub_exception(
+                    "Error while checking hub state after top-level exception.",
+                    state_err,
+                    getattr(state_err, "__traceback__", None),
+                )
+                app = None
+                _hub_exit_state["app"] = None
+
+        try:
+            if app is not None and bool(getattr(app, "_hub_user_closed", False)):
+                _hub_exit_state["reason"] = "hub window close handler ran"
+                _print_top_level_hub_exception(
+                    "Leaving hub loop because _hub_user_closed=True. The _on_close stack above should show who/what triggered it."
+                )
+                break
+        except BaseException as close_check_err:
+            _hub_exit_state["reason"] = f"close-check exception: {type(close_check_err).__name__}"
+            _print_top_level_hub_exception(
+                "Error while checking whether the hub was user-closed.",
+                close_check_err,
+                getattr(close_check_err, "__traceback__", None),
+            )
+            app = None
+            _hub_exit_state["app"] = None
+
+        time.sleep(1)

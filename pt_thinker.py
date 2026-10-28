@@ -239,74 +239,324 @@ def _ema(values: list, period: int):
 	return float(ema)
 
 def _compute_daily_ema200(sym: str):
-	"""
-	Return (ema200, price_used, pct_from_ema) for SYM.
+    """
+    Return:
+        (ema200, current_price, pct_from_ema200)
 
-	- EMA200 is computed from daily kline closes (Kucoin 1day data).
-	- pct_from_ema is computed using CURRENT price when available (Robinhood current ask),
-	  falling back to the most recent daily close if current price is unavailable.
-	"""
-	sym_u = str(sym).upper().strip()
-	coin = sym_u + "-USDT"
+    Uses KuCoin's public REST candle endpoint directly instead of relying
+    on the old kucoin-python Market.get_kline() wrapper.
 
-	# --- get daily closes for EMA200 ---
-	try:
-		history = market.get_kline(coin, "1day")
-	except Exception:
-		return None, None, None
+    Current price still comes from Robinhood, because that is the price
+    source the trader actually buys from.
+    """
 
-	closes = []
-	try:
-		for row in history:
-			if row and len(row) >= 3:
-				closes.append(float(row[2]))
-	except Exception:
-		closes = []
+    sym_u = str(sym).upper().strip()
 
-	if not closes:
-		return None, None, None
+    if not sym_u:
+        return None, None, None
 
-	closes_rev = list(reversed(closes))
-	ema200 = _ema(closes_rev, 200)
+    now_ts = int(time.time())
 
-	# --- choose price to compare against EMA200 ---
-	last_close = float(closes_rev[-1]) if closes_rev else None
-	price_used = last_close
+    # Request well over 200 days so EMA200 always has enough history.
+    start_ts = now_ts - (450 * 24 * 60 * 60)
 
-	# Prefer current Robinhood ask for pct calc (matches what trader actually pays on buys)
-	try:
-		rh_symbol = f"{sym_u}-USD"
-		price_used = float(robinhood_current_ask(rh_symbol))
-	except Exception:
-		price_used = last_close
+    history = None
+    pair_used = None
+    last_error = None
 
-	if ema200 is None or price_used is None or float(ema200) <= 0.0:
-		return ema200, price_used, None
+    # Prefer USDT. Try USDC as a fallback if necessary.
+    for quote in ("USDT", "USDC"):
 
-	pct = (float(price_used) - float(ema200)) / float(ema200) * 100.0
-	return float(ema200), float(price_used), float(pct)
+        pair = f"{sym_u}-{quote}"
 
+        try:
+            response = requests.get(
+                "https://api.kucoin.com/api/v1/market/candles",
+                params={
+                    "symbol": pair,
+                    "type": "1day",
+                    "startAt": start_ts,
+                    "endAt": now_ts,
+                },
+                timeout=15,
+            )
+
+            response.raise_for_status()
+
+            payload = response.json()
+
+            if not isinstance(payload, dict):
+                raise RuntimeError(
+                    f"Unexpected KuCoin response type: {type(payload).__name__}"
+                )
+
+            if str(payload.get("code", "")) != "200000":
+                raise RuntimeError(
+                    f"KuCoin returned code={payload.get('code')} "
+                    f"for {pair}: {payload}"
+                )
+
+            rows = payload.get("data", [])
+
+            if not isinstance(rows, list):
+                raise RuntimeError(
+                    f"KuCoin data for {pair} was not a list"
+                )
+
+            if len(rows) < 200:
+                raise RuntimeError(
+                    f"Only {len(rows)} daily candles returned for {pair}"
+                )
+
+            history = rows
+            pair_used = pair
+            break
+
+        except Exception as e:
+            last_error = e
+            continue
+
+
+    if not history:
+        print(
+            f"[LTH EMA200] {sym_u}: FAILED to get enough daily candles. "
+            f"Last error: {last_error}"
+        )
+        return None, None, None
+
+
+    # ------------------------------------------------------------
+    # Parse candle closes.
+    #
+    # KuCoin returns newest-first, but sorting by timestamp makes
+    # this safe even if that ever changes.
+    # ------------------------------------------------------------
+
+    parsed = []
+
+    for row in history:
+
+        try:
+            if not row or len(row) < 3:
+                continue
+
+            candle_ts = int(float(row[0]))
+            close_price = float(row[2])
+
+            if close_price <= 0.0:
+                continue
+
+            parsed.append(
+                (
+                    candle_ts,
+                    close_price,
+                )
+            )
+
+        except Exception:
+            continue
+
+
+    if len(parsed) < 200:
+        print(
+            f"[LTH EMA200] {sym_u}: only {len(parsed)} valid daily closes "
+            f"from {pair_used}."
+        )
+        return None, None, None
+
+
+    # Oldest -> newest
+    parsed.sort(
+        key=lambda x: x[0]
+    )
+
+    closes = [
+        close
+        for _ts, close in parsed
+    ]
+
+
+    ema200 = _ema(
+        closes,
+        200
+    )
+
+
+    if ema200 is None or float(ema200) <= 0.0:
+        print(
+            f"[LTH EMA200] {sym_u}: EMA200 calculation failed."
+        )
+        return None, None, None
+
+
+    # Latest KuCoin daily close is only the fallback.
+    latest_daily_close = float(
+        closes[-1]
+    )
+
+
+    # ------------------------------------------------------------
+    # CURRENT price:
+    # use Robinhood ask because that is what the trader actually
+    # pays when making the LTH buy.
+    # ------------------------------------------------------------
+
+    try:
+        rh_symbol = f"{sym_u}-USD"
+
+        current_price = float(
+            robinhood_current_ask(
+                rh_symbol
+            )
+        )
+
+    except Exception as e:
+
+        print(
+            f"[LTH EMA200] {sym_u}: Robinhood current price failed "
+            f"({e}); using latest KuCoin daily close."
+        )
+
+        current_price = latest_daily_close
+
+
+    if current_price <= 0.0:
+        return None, None, None
+
+
+    pct_from_ema = (
+        (
+            current_price
+            -
+            float(ema200)
+        )
+        /
+        float(ema200)
+    ) * 100.0
+
+
+    print(
+        f"[LTH EMA200] {sym_u}: "
+        f"price={current_price:.8f} "
+        f"ema200={float(ema200):.8f} "
+        f"pct={pct_from_ema:+.2f}% "
+        f"source={pair_used}"
+    )
+
+
+    return (
+        float(ema200),
+        float(current_price),
+        float(pct_from_ema),
+    )
 
 def _write_lth_ema200_snapshot() -> None:
-	global _last_lth_ema_write_ts
-	now = time.time()
-	if (now - float(_last_lth_ema_write_ts)) < 5.0:
-		return
-	_last_lth_ema_write_ts = now
-	syms = _load_long_term_symbols_from_settings()
-	coins = {}
-	for sym in syms:
-		ema200, price, pct = _compute_daily_ema200(sym)
-		if ema200 is None or price is None:
-			continue
-		coins[sym] = {"ema200": ema200, "price": price, "pct_from_ema200": pct}
-	payload = {"ts": now, "coins": coins}
-	try:
-		with open(LTH_EMA200_PATH, "w", encoding="utf-8") as f:
-			json.dump(payload, f)
-	except Exception:
-		pass
+    global _last_lth_ema_write_ts
 
+    now = time.time()
+
+    if (
+        now
+        -
+        float(
+            _last_lth_ema_write_ts
+        )
+    ) < 30.0:
+        return
+
+
+    _last_lth_ema_write_ts = now
+
+
+    syms = (
+        _load_long_term_symbols_from_settings()
+    )
+
+
+    coins = {}
+    missing = []
+
+
+    for sym in syms:
+
+        ema200, price, pct = (
+            _compute_daily_ema200(
+                sym
+            )
+        )
+
+
+        if (
+            ema200 is None
+            or price is None
+            or pct is None
+        ):
+
+            missing.append(
+                str(sym).upper().strip()
+            )
+
+            continue
+
+
+        coins[
+            str(sym).upper().strip()
+        ] = {
+            "ema200": float(ema200),
+            "price": float(price),
+            "pct_from_ema200": float(pct),
+        }
+
+
+    payload = {
+        "ts": time.time(),
+        "coins": coins,
+        "missing": missing,
+    }
+
+
+    try:
+
+        tmp_path = (
+            LTH_EMA200_PATH
+            +
+            ".tmp"
+        )
+
+
+        with open(
+            tmp_path,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
+            json.dump(
+                payload,
+                f,
+                indent=2
+            )
+
+
+        os.replace(
+            tmp_path,
+            LTH_EMA200_PATH
+        )
+
+
+    except Exception as e:
+
+        print(
+            f"[LTH EMA200] Failed writing snapshot: {e}"
+        )
+
+
+    if missing:
+
+        print(
+            "[LTH EMA200] Missing percentages for: "
+            +
+            ", ".join(missing)
+        )
 
 def coin_folder(sym: str) -> str:
 	sym = sym.upper()
@@ -693,11 +943,11 @@ def step_coin(sym: str):
 	current_candle = 100 * ((closePrice - openPrice) / openPrice)
 
 	# ====== ORIGINAL: load threshold + memories/weights and compute moves ======
-	file = open('neural_perfect_threshold_' + tf_choices[tf_choice_index] + '.txt', 'r')
-	perfect_threshold = float(file.read())
-	file.close()
-
 	try:
+		file = open('neural_perfect_threshold_' + tf_choices[tf_choice_index] + '.txt', 'r')
+		perfect_threshold = float(file.read())
+		file.close()
+
 		# If we can read/parse training files, this timeframe is NOT a training-file issue.
 		training_issues[tf_choice_index] = 0
 
@@ -801,10 +1051,7 @@ def step_coin(sym: str):
 		del perfects[tf_choice_index]
 		perfects.insert(tf_choice_index, 'inactive')
 
-	# keep threshold persisted (original behavior)
-	file = open('neural_perfect_threshold_' + tf_choices[tf_choice_index] + '.txt', 'w+')
-	file.write(str(perfect_threshold))
-	file.close()
+
 
 	# ====== ORIGINAL: compute new high/low predictions ======
 	price_list2 = [openPrice, closePrice]
